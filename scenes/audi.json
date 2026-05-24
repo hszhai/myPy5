@@ -1,0 +1,15 @@
+{
+  "name": "audi",
+  "ply": "data/audi.ply",
+  "out": "images/audi_render.png",
+  "credit": "Audi A5 Sportback by Talha Ayub -- https://superspl.at/scene/97ae0ba1 -- CC-BY 4.0",
+  "scene_up_flip": true,
+  "w": 900,
+  "h": 700,
+  "elev_deg": 15.0,
+  "azim_deg": 40.0,
+  "distance_k": 1.5,
+  "fov_deg": 35.0,
+  "head_bias_x": 0.0,
+  "head_bias_y": 0.0
+}

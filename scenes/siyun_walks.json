@@ -1,0 +1,74 @@
+{
+  "name": "siyun",
+  "model": {
+    "ply": "data/Siyun.ply",
+    "scene_up_flip": true,
+    "credit": "Siyun by Siyun Sun -- https://superspl.at/user?id=siyunsun -- CC-BY 4.0"
+  },
+  "render": {
+    "out": "images/siyun_render.png",
+    "w": 1080,
+    "h": 1440
+  },
+  "camera": {
+    "elev_deg": 0.0,
+    "azim_deg": 235.0,
+    "distance_k": 1.2,
+    "fov_deg": 28.0,
+    "head_bias_x": -0.2,
+    "head_bias_y": 2.0
+  },
+  "surface_walks": {
+    "n_walkers": 800,
+    "steps": 40,
+    "step_radius_px": 14.0,
+    "forward_bias": 8.0,
+    "direction_mode": "global",
+    "global_dir_deg": 90.0,
+    "noise_scale": 90.0,
+    "stroke_alpha": 0.7,
+    "ink_darken": 0.0,
+    "placement": "saliency",
+    "stroke_mode": "line",
+    "stroke_width": 1.0,
+    "splat_scale": 0.35,
+    "splat_alpha_scale": 0.35,
+    "splat_min_sigma": 0.1,
+    "splat_max_sigma": 1.2,
+    "n_stamps": 5,
+    "seed": 17
+  },
+  "composition": {
+    "out": "images/siyun_layers.png",
+    "background": [0.97, 0.96, 0.93],
+    "layers": [
+      {
+        "name": "ghost_base",
+        "type": "base_splat",
+        "enabled": true,
+        "point_pct": 0.25,
+        "alpha": 0.65,
+        "seed": 17,
+        "bg": [0.97, 0.96, 0.93]
+      },
+      {
+        "name": "surface_lines",
+        "type": "surface_walks",
+        "enabled": true,
+        "alpha": 1.0,
+        "params": {
+          "stroke_mode": "line",
+          "n_walkers": 600,
+          "steps": 35,
+          "step_radius_px": 14.0,
+          "forward_bias": 8.0,
+          "direction_mode": "global",
+          "global_dir_deg": 90.0,
+          "stroke_alpha": 0.65,
+          "ink_darken": 0.0,
+          "stroke_width": 1.0
+        }
+      }
+    ]
+  }
+}

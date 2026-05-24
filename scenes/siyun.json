@@ -1,0 +1,15 @@
+{
+  "name": "siyun",
+  "ply": "data/Siyun.ply",
+  "out": "images/siyun_render.png",
+  "credit": "Siyun by Siyun Sun -- https://superspl.at/user?id=siyunsun -- CC-BY 4.0",
+  "scene_up_flip": true,
+  "w": 1080,
+  "h": 1440,
+  "elev_deg": 0.0,
+  "azim_deg": 235.0,
+  "distance_k": 1.2,
+  "fov_deg": 28.0,
+  "head_bias_x": -0.2,
+  "head_bias_y": 2.0
+}

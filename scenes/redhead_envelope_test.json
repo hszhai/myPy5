@@ -1,0 +1,46 @@
+{
+  "name": "redhead",
+  "ply": "data/RedHead.ply",
+  "out": "images/redhead_render.png",
+  "credit": "Red Head Business Optional by Splat Boss -- https://superspl.at/scene/48a4d4e4 -- CC-BY 4.0",
+  "scene_up_flip": true,
+  "w": 1080,
+  "h": 1440,
+  "elev_deg": 0.0,
+  "azim_deg": 0.0,
+  "distance_k": 1.5,
+  "fov_deg": 28.0,
+  "head_bias_x": 0.0,
+  "head_bias_y": 0.0,
+  "composition": {
+    "out": "images/redhead_envelope_test.png",
+    "background": [
+      0.97,
+      0.96,
+      0.93
+    ],
+    "layers": [
+      {
+        "name": "base",
+        "type": "base_splat",
+        "enabled": true,
+        "point_pct": 0.25,
+        "alpha": 0.7,
+        "seed": 17
+      },
+      {
+        "name": "walks",
+        "type": "surface_walks",
+        "enabled": true,
+        "alpha": 1.0,
+        "params": {
+          "normal_offset_scale": 3.0,
+          "offset_envelope_mode": "noise",
+          "offset_envelope_scale": 40.0,
+          "n_walkers": 400,
+          "steps": 30
+        }
+      }
+    ]
+  }
+}
