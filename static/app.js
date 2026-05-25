@@ -53,7 +53,7 @@ function formatBbox(min, max) {
 // -------------------------------------------------------------- camera ----
 function setupCameraInputs() {
   syncInputsFromCamera();
-  ['elev', 'azim', 'fov', 'dist'].forEach((k) => {
+  ['elev', 'azim', 'fov', 'dist', 'bias-x', 'bias-y'].forEach((k) => {
     $('cam-' + k).addEventListener('change', commitCameraFromInputs);
   });
 }
@@ -65,6 +65,8 @@ function syncInputsFromCamera() {
   $('cam-azim').value = CAMERA.azim_deg;
   $('cam-fov').value  = CAMERA.fov_deg;
   $('cam-dist').value = CAMERA.distance_k;
+  $('cam-bias-x').value = CAMERA.head_bias_x ?? 0;
+  $('cam-bias-y').value = CAMERA.head_bias_y ?? 0;
 }
 
 async function commitCameraFromInputs({ silent = false } = {}) {
@@ -73,6 +75,8 @@ async function commitCameraFromInputs({ silent = false } = {}) {
     azim_deg: +$('cam-azim').value,
     fov_deg:  +$('cam-fov').value,
     distance_k: +$('cam-dist').value,
+    head_bias_x: +$('cam-bias-x').value,
+    head_bias_y: +$('cam-bias-y').value,
   };
   try {
     const res = await api('/api/camera', { method: 'POST', body: localCamera });
@@ -186,20 +190,26 @@ function positionThreeCameraFromState() {
   const elev = CAMERA.elev_deg * Math.PI / 180;
   const azim = -CAMERA.azim_deg * Math.PI / 180;          // gsplat → three.js
   const r = three.bbDiag * CAMERA.distance_k;
-  const c = three.bbCenter;
+  const target = three.bbCenter.clone();
+  target.x += (CAMERA.head_bias_x || 0);
+  target.y += (CAMERA.head_bias_y || 0);
   three.camera.position.set(
-    c.x + r * Math.cos(elev) * Math.sin(azim),
-    c.y + r * Math.sin(elev),
-    c.z + r * Math.cos(elev) * Math.cos(azim),
+    target.x + r * Math.cos(elev) * Math.sin(azim),
+    target.y + r * Math.sin(elev),
+    target.z + r * Math.cos(elev) * Math.cos(azim),
   );
-  three.camera.lookAt(c);
+  three.camera.lookAt(target);
+  three.controls.target.copy(target);
   three.camera.fov = CAMERA.fov_deg;
   three.camera.updateProjectionMatrix();
   three.controls.update();
 }
 
 function syncCameraFromOrbit() {
-  const dir = three.camera.position.clone().sub(three.bbCenter);
+  const biasedCenter = three.bbCenter.clone();
+  biasedCenter.x += (CAMERA.head_bias_x || 0);
+  biasedCenter.y += (CAMERA.head_bias_y || 0);
+  const dir = three.camera.position.clone().sub(biasedCenter);
   const r = dir.length();
   const elev = Math.atan2(dir.y, Math.sqrt(dir.x * dir.x + dir.z * dir.z));
   const azim = -Math.atan2(dir.x, dir.z);                 // three.js → gsplat
@@ -208,6 +218,8 @@ function syncCameraFromOrbit() {
     azim_deg: azim * 180 / Math.PI,
     fov_deg: three.camera.fov,
     distance_k: r / three.bbDiag,
+    head_bias_x: CAMERA.head_bias_x,
+    head_bias_y: CAMERA.head_bias_y,
   };
   syncInputsFromCamera();
 }
@@ -477,6 +489,8 @@ async function doRender() {
       azim_deg: +$('cam-azim').value,
       fov_deg:  +$('cam-fov').value,
       distance_k: +$('cam-dist').value,
+      head_bias_x: +$('cam-bias-x').value,
+      head_bias_y: +$('cam-bias-y').value,
     };
     console.log('[doRender] sending camera:', camera);
     CAMERA = camera;

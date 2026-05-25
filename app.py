@@ -20,6 +20,12 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
 
+# Optional remote rendering support
+try:
+    import requests
+except ImportError:
+    requests = None
+
 from render_layers import (
     DEFAULT_COMPOSITION, DEFAULT_WALKS, LAYER_PARAM_SCHEMAS, WALK_KEY_MAP,
     build_scene_data, render_composition, reproject_scene,
@@ -42,7 +48,16 @@ SCENE_REF = os.environ.get("SCENE_FILE") or os.environ.get("SCENE_NAME", "siyun"
 cfg = load_scene(SCENE_REF)
 SCENE_JSON = cfg.PATH if hasattr(cfg, "PATH") else scene_path(SCENE_REF)
 
+REMOTE_RENDER_URL = os.environ.get("REMOTE_RENDER_URL")
+if REMOTE_RENDER_URL and requests is None:
+    print("[app] WARNING: REMOTE_RENDER_URL is set but 'requests' is not installed.")
+    print("[app]          Install it with: pip install requests")
+    print("[app]          Remote mode disabled.")
+    REMOTE_RENDER_URL = None
+
 print(f"[app] loading scene: {SCENE_REF}")
+if REMOTE_RENDER_URL:
+    print(f"[app] remote render mode: {REMOTE_RENDER_URL}")
 scene_data = build_scene_data(SCENE_REF)
 # ROOT FIX: build_scene_data calls load_scene() internally, producing its
 # own cfg namespace. Alias app.py's cfg to that one so /api/camera mutations
@@ -140,6 +155,8 @@ def _camera_tuple():
         float(getattr(cfg, "AZIM_DEG", 0.0)),
         float(getattr(cfg, "FOV_DEG", 28.0)),
         float(getattr(cfg, "DISTANCE_K", 1.5)),
+        float(getattr(cfg, "HEAD_BIAS_X", 0.0)),
+        float(getattr(cfg, "HEAD_BIAS_Y", 0.0)),
     )
 
 
@@ -157,7 +174,8 @@ def _apply_camera_override(cam):
         return False
     changed = False
     for key, attr in (("elev_deg", "ELEV_DEG"), ("azim_deg", "AZIM_DEG"),
-                       ("fov_deg", "FOV_DEG"), ("distance_k", "DISTANCE_K")):
+                       ("fov_deg", "FOV_DEG"), ("distance_k", "DISTANCE_K"),
+                       ("head_bias_x", "HEAD_BIAS_X"), ("head_bias_y", "HEAD_BIAS_Y")):
         if key in cam and cam[key] is not None:
             new_v = float(cam[key])
             old_v = float(getattr(cfg, attr, 0.0))
@@ -188,6 +206,8 @@ def _camera_dict():
         azim_deg=float(getattr(cfg, "AZIM_DEG", 0.0)),
         fov_deg=float(getattr(cfg, "FOV_DEG", 40.0)),
         distance_k=float(getattr(cfg, "DISTANCE_K", 1.0)),
+        head_bias_x=float(getattr(cfg, "HEAD_BIAS_X", 0.0)),
+        head_bias_y=float(getattr(cfg, "HEAD_BIAS_Y", 0.0)),
     )
 
 
@@ -275,6 +295,42 @@ def api_remove_layer():
     return jsonify({"error": "bad index"}), 400
 
 
+class RemoteRenderError(Exception):
+    pass
+
+
+def _remote_render(payload):
+    """Forward a render request to REMOTE_RENDER_URL and save the returned
+    PNG locally so the frontend can fetch it via /img/..."""
+    resp = requests.post(
+        f"{REMOTE_RENDER_URL}/api/render",
+        json=payload,
+        timeout=300,
+    )
+    if not resp.ok:
+        try:
+            detail = resp.json().get("error", resp.text)
+        except Exception:
+            detail = resp.text
+        raise RemoteRenderError(f"remote error ({resp.status_code}): {detail}")
+
+    ts = int(time.time())
+    filename = f"{cfg.SCENE_NAME}_remote_{ts}.png"
+    local_path = Path(__file__).parent / "images" / filename
+    local_path.write_bytes(resp.content)
+
+    global last_render_path
+    last_render_path = str(local_path)
+    _append_log(f"remote render -> {last_render_path}")
+
+    return jsonify({
+        "ok": True,
+        "image": f"/img/{filename}?t={ts}",
+        "time": 0,
+        "log": log_lines[-50:],
+    })
+
+
 @app.route("/api/render", methods=["POST"])
 def api_render():
     """Render with the live composition and camera.
@@ -283,6 +339,9 @@ def api_render():
     present, they OVERRIDE whatever's in memory -- the UI is the source of
     truth for the render. After overrides land, we reproject whenever
     _apply_camera_override actually mutated cfg.
+
+    If REMOTE_RENDER_URL is configured, the render is offloaded to the remote
+    server; on failure it falls back to local rendering automatically.
     """
     global last_render_path, composition, _projected_camera
     payload = request.get_json() or {}
@@ -291,6 +350,17 @@ def api_render():
         cam_changed = _apply_camera_override(payload["camera"])
     if "composition" in payload:
         composition = payload["composition"]
+
+    # Try remote render first if configured
+    if REMOTE_RENDER_URL:
+        try:
+            return _remote_render(payload)
+        except RemoteRenderError as exc:
+            _append_log(f"remote render failed: {exc}")
+            _append_log("falling back to local render...")
+        except Exception as exc:
+            _append_log(f"remote connection failed: {exc}")
+            _append_log("falling back to local render...")
 
     # Always reproject. The camera passed in /api/render is the source of
     # truth; we deliberately do NOT trust any lazy "projection-already-up-to-
@@ -355,11 +425,14 @@ def api_save_scene():
         # (scene_io supports either nested or flat; we standardise on nested
         # and clear the legacy flat keys so there's one source of truth).
         cam = data.setdefault("camera", {})
-        cam["elev_deg"]   = float(getattr(cfg, "ELEV_DEG", 0.0))
-        cam["azim_deg"]   = float(getattr(cfg, "AZIM_DEG", 0.0))
-        cam["fov_deg"]    = float(getattr(cfg, "FOV_DEG", 28.0))
-        cam["distance_k"] = float(getattr(cfg, "DISTANCE_K", 1.5))
-        for k in ("elev_deg", "azim_deg", "fov_deg", "distance_k"):
+        cam["elev_deg"]    = float(getattr(cfg, "ELEV_DEG", 0.0))
+        cam["azim_deg"]    = float(getattr(cfg, "AZIM_DEG", 0.0))
+        cam["fov_deg"]     = float(getattr(cfg, "FOV_DEG", 28.0))
+        cam["distance_k"]  = float(getattr(cfg, "DISTANCE_K", 1.5))
+        cam["head_bias_x"] = float(getattr(cfg, "HEAD_BIAS_X", 0.0))
+        cam["head_bias_y"] = float(getattr(cfg, "HEAD_BIAS_Y", 0.0))
+        for k in ("elev_deg", "azim_deg", "fov_deg", "distance_k",
+                  "head_bias_x", "head_bias_y"):
             data.pop(k, None)
         with open(SCENE_JSON, "w") as f:
             json.dump(data, f, indent=2)
