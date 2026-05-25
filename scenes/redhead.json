@@ -6,10 +6,83 @@
   "scene_up_flip": true,
   "w": 1080,
   "h": 1440,
-  "elev_deg": 0.0,
-  "azim_deg": 0.0,
-  "distance_k": 1.5,
-  "fov_deg": 28.0,
   "head_bias_x": 0.0,
-  "head_bias_y": 0.0
+  "head_bias_y": 0.0,
+  "composition": {
+    "background": [
+      0.97,
+      0.96,
+      0.93
+    ],
+    "layers": [
+      {
+        "alpha": 1,
+        "bg_b": 0,
+        "bg_g": 0,
+        "bg_r": 0,
+        "curvature_weight": 0,
+        "depth_blur": 0,
+        "depth_focus": 0.5,
+        "enabled": false,
+        "mask3d_enabled": false,
+        "mask3d_invert": false,
+        "mask3d_r_in": 0.3,
+        "mask3d_r_out": 1,
+        "mask3d_x": 0,
+        "mask3d_y": 0,
+        "mask3d_z": 0,
+        "name": "base",
+        "point_pct": 0.5,
+        "saturation": 1,
+        "seed": 17,
+        "type": "base_splat"
+      },
+      {
+        "alpha": 1,
+        "enabled": true,
+        "mask3d_enabled": false,
+        "mask3d_invert": false,
+        "mask3d_r_in": 0.3,
+        "mask3d_r_out": 1,
+        "mask3d_x": 0,
+        "mask3d_y": 0,
+        "mask3d_z": 0,
+        "name": "walks",
+        "params": {
+          "direction_mode": "momentum",
+          "forward_bias": 8,
+          "global_dir_deg": 90,
+          "ink_b": 0,
+          "ink_darken": 0.85,
+          "ink_g": 0,
+          "ink_r": 1,
+          "n_stamps": 5,
+          "n_walkers": 4000,
+          "noise_scale": 90,
+          "normal_offset_scale": 0,
+          "offset_envelope_mode": "none",
+          "offset_envelope_scale": 50,
+          "placement": "curvature",
+          "seed": 17,
+          "splat_alpha_scale": 0.35,
+          "splat_max_sigma": 3,
+          "splat_min_sigma": 0.1,
+          "splat_scale": 0.35,
+          "step_radius_px": 14,
+          "steps": 35,
+          "stroke_alpha": 0.65,
+          "stroke_mode": "splat",
+          "stroke_width": 1
+        },
+        "type": "surface_walks"
+      }
+    ],
+    "out": null
+  },
+  "camera": {
+    "elev_deg": -3.0,
+    "azim_deg": -22.0,
+    "fov_deg": 28.0,
+    "distance_k": 1.5
+  }
 }

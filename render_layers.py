@@ -145,22 +145,22 @@ WALK_KEY_MAP = {
 # `enabled` and `alpha` are handled by the tuner separately (every layer has them)
 # and are NOT listed below.
 #
-# FOCAL_FIELDS are appended to every type. The focal mask is a per-layer
-# screen-space alpha modulator (rotated ellipse + smoothstep falloff) applied
-# at COMPOSITE time, so changing focal params doesn't bust the layer cache.
-# All focal_* keys live at the layer's top level regardless of params_in.
+# MASK3D_FIELDS are appended to every type. Unlike a screen-space mask, this
+# one is a 3D distance ball: per-gaussian factor = smoothstep on distance from
+# an anchor xyz, applied at RENDER time (per-gaussian opacity / placement
+# weight). Moves with the head when the camera rotates. The vec3 schema type
+# expands "mask3d" into three sub-fields mask3d_x / mask3d_y / mask3d_z.
+# All mask3d_* keys live at the layer's top level regardless of params_in.
 # ----------------------------------------------------------------------
-FOCAL_FIELDS = [
-    ("focal_enabled",   "focal on",    "bool",  "",       None),
-    ("focal_cx",        "focal cx",    "float", "{:.2f}", None),
-    ("focal_cy",        "focal cy",    "float", "{:.2f}", None),
-    ("focal_rx",        "focal rx",    "float", "{:.2f}", None),
-    ("focal_ry",        "focal ry",    "float", "{:.2f}", None),
-    ("focal_angle_deg", "focal angle", "float", "{:.0f}", None),
-    ("focal_falloff",   "focal soft",  "float", "{:.2f}", None),
-    ("focal_invert",    "focal invert","bool",  "",       None),
+MASK3D_FIELDS = [
+    ("mask3d_enabled", "mask 3d", "bool",  "",       None),
+    ("mask3d",         "anchor",  "vec3",  "{:.2f}", None),
+    ("mask3d_r_in",    "r inner", "float", "{:.2f}", None),
+    ("mask3d_r_out",   "r outer", "float", "{:.2f}", None),
+    ("mask3d_invert",  "invert",  "bool",  "",       None),
 ]
-_FOCAL_KEYS = {f[0] for f in FOCAL_FIELDS}
+_MASK3D_KEYS = {"mask3d_enabled", "mask3d_x", "mask3d_y", "mask3d_z",
+                "mask3d_r_in", "mask3d_r_out", "mask3d_invert"}
 
 LAYER_PARAM_SCHEMAS = {
     "base_splat": {
@@ -174,7 +174,12 @@ LAYER_PARAM_SCHEMAS = {
             # 0 = uniform/depth random sampling (current behaviour);
             # 1 = sample fully weighted by per-gaussian curvature.
             ("curvature_weight", "curvature", "float", "{:.2f}", None),
-        ] + FOCAL_FIELDS,
+            # Depth-of-field on the splat: focus picks a depth percentile
+            # (0 = closest visible, 1 = farthest), blur scales per-gaussian
+            # cov2d + fades opacity by distance from that focus depth.
+            ("depth_focus",      "depth focus", "float", "{:.2f}", None),
+            ("depth_blur",       "depth blur",  "float", "{:.2f}", None),
+        ] + MASK3D_FIELDS,
     },
     "surface_walks": {
         "params_in": "params",
@@ -203,7 +208,7 @@ LAYER_PARAM_SCHEMAS = {
                  "ramp", "ease_in", "ease_out", "ease_in_out", "cycle", "pulse"]),
             ("offset_envelope_scale", "env scale", "float", "{:.0f}", None),
             ("seed",              "seed",          "int",   "{:.0f}", None),
-        ] + FOCAL_FIELDS,
+        ] + MASK3D_FIELDS,
     },
 }
 
@@ -230,8 +235,8 @@ def layer_param_set(layer, key, value):
     """Write a value to the layer's natural location for this key."""
     schema = LAYER_PARAM_SCHEMAS.get(layer.get("type"), {})
     section = schema.get("params_in")
-    # focal_* always lives at the layer's top level regardless of params_in
-    if section and key not in _FOCAL_KEYS:
+    # mask3d_* always lives at the layer's top level regardless of params_in
+    if section and key not in _MASK3D_KEYS:
         layer.setdefault(section, {})[key] = value
     else:
         layer[key] = value
@@ -265,7 +270,60 @@ def _project_scene(cfg, G):
         cam_xyz, cov_cam, focal, distance, cfg.W, cfg.H, ysign)
     keep = cull(mean2d, cov2d, G["opacities"], valid_z, cfg.W, cfg.H,
                 sub_pixel=0.0)
-    return mean2d, cov2d, depths, keep
+    # Camera params the tuner needs to reproject arbitrary 3D anchor points.
+    camera = dict(center=center, Rcam=Rcam, focal=focal,
+                  distance=distance, ysign=ysign)
+    return mean2d, cov2d, depths, keep, camera
+
+
+def reproject_scene(scene_data):
+    """Re-run the camera-dependent projection step. Mutates scene_data.
+    Call after cfg.ELEV_DEG / AZIM_DEG / FOV_DEG / DISTANCE_K change.
+    Also recomputes ref_img and saliency so that surface_walks layers
+    sample colours from the current viewpoint rather than a stale one.
+    """
+    cfg = scene_data["cfg"]
+    G = scene_data["G"]
+    print(f"[reproject_scene] cfg values:  "
+          f"ELEV_DEG={cfg.ELEV_DEG:g}  AZIM_DEG={cfg.AZIM_DEG:g}  "
+          f"FOV_DEG={cfg.FOV_DEG:g}  DISTANCE_K={cfg.DISTANCE_K:g}")
+    mean2d, cov2d, depths, keep, camera = _project_scene(cfg, G)
+    scene_data["mean2d"] = mean2d
+    scene_data["cov2d"] = cov2d
+    scene_data["depths"] = depths
+    scene_data["keep"] = keep
+    scene_data["camera"] = camera
+
+    # Recompute reference image + saliency for the new viewpoint so that
+    # surface_walks layers pick up correct colours after camera edits.
+    order = keep[np.argsort(-depths[keep])]
+    ref_img = splat(cfg.W, cfg.H, mean2d, cov2d, G["colors"], G["opacities"],
+                    order, verbose=False)
+    scene_data["ref_img"] = ref_img
+    scene_data["saliency"] = compute_saliency(ref_img)
+
+    import hashlib
+    m_hash = hashlib.md5(mean2d.tobytes()).hexdigest()[:8]
+    print(f"[reproject_scene] new mean2d: shape={mean2d.shape}  hash={m_hash}  "
+          f"x∈[{float(mean2d[:,0].min()):+.1f}, {float(mean2d[:,0].max()):+.1f}]  "
+          f"y∈[{float(mean2d[:,1].min()):+.1f}, {float(mean2d[:,1].max()):+.1f}]  "
+          f"keep={len(keep)}")
+
+
+def project_anchor(camera, cfg, xyz):
+    """Project a world-space point through the same camera the scene uses.
+    Returns (x_pixel, y_pixel, z_view) where z_view > 0 means in front of
+    the camera. Use the inverse of `keep` mapping if you need to know if
+    the projected pixel lands inside the canvas.
+    """
+    p = np.asarray(xyz, dtype=np.float64).reshape(3)
+    cam_p = (p - camera["center"]) @ camera["Rcam"].T
+    z = cam_p[2] + camera["distance"]
+    if z <= 1e-6:
+        return None
+    x_px = cfg.W / 2.0 + camera["focal"] * cam_p[0] / z
+    y_px = cfg.H / 2.0 + camera["ysign"] * camera["focal"] * cam_p[1] / z
+    return float(x_px), float(y_px), float(z)
 
 
 def _over(canvas, color, alpha, layer_alpha=1.0):
@@ -273,41 +331,30 @@ def _over(canvas, color, alpha, layer_alpha=1.0):
     return canvas * (1.0 - a) + color * a
 
 
-def _focal_mask(W, H, spec):
-    """Per-layer focal-region alpha modulator.
+def _mask3d_factors(xyz_subset, spec):
+    """Per-gaussian 3D-distance mask factor in [0, 1].
 
-    Returns an (H, W) float64 array in [0, 1], or None when focal_enabled is
-    false. Geometry: rotated ellipse centred at (focal_cx*W, focal_cy*H) with
-    radii (focal_rx, focal_ry) * max(W, H). Inside the inner ellipse
-    (d = 1 - falloff) the mask is 1; outside the outer ellipse (d = 1 + falloff)
-    the mask is 0; between them, a smoothstep transition. focal_invert flips
-    the mask (useful for vignette: 0 in centre, 1 at edges)."""
-    if not spec.get("focal_enabled", False):
+    Returns None when mask3d_enabled is False. Otherwise returns a (N,) array
+    aligned with `xyz_subset` (typically G["xyz"][order] or G["xyz"][keep]).
+    Geometry: smoothstep falloff between r_in and r_out from `(mask3d_x,
+    mask3d_y, mask3d_z)`. mask3d_invert flips inside/outside.
+    """
+    if not spec.get("mask3d_enabled", False):
         return None
-    cx = float(spec.get("focal_cx", 0.5)) * W
-    cy = float(spec.get("focal_cy", 0.5)) * H
-    norm = float(max(W, H))
-    rx = max(float(spec.get("focal_rx", 0.35)) * norm, 1.0)
-    ry = max(float(spec.get("focal_ry", 0.45)) * norm, 1.0)
-    angle = np.radians(float(spec.get("focal_angle_deg", 0.0)))
-    falloff = float(spec.get("focal_falloff", 0.6))
-    invert = bool(spec.get("focal_invert", False))
+    cx = float(spec.get("mask3d_x", 0.0))
+    cy = float(spec.get("mask3d_y", 0.0))
+    cz = float(spec.get("mask3d_z", 0.0))
+    r_in = max(float(spec.get("mask3d_r_in", 0.3)), 1e-6)
+    r_out = max(float(spec.get("mask3d_r_out", 1.0)), r_in + 1e-6)
+    invert = bool(spec.get("mask3d_invert", False))
 
-    ys, xs = np.mgrid[0:H, 0:W]
-    dx = xs - cx
-    dy = ys - cy
-    cosA, sinA = np.cos(angle), np.sin(angle)
-    u = (dx * cosA + dy * sinA) / rx
-    v = (-dx * sinA + dy * cosA) / ry
-    d = np.sqrt(u * u + v * v)
-
-    inner = max(1.0 - falloff, 0.0)
-    outer = 1.0 + max(falloff, 1e-3)
-    t = np.clip((d - inner) / (outer - inner), 0.0, 1.0)
-    mask = 1.0 - t * t * (3.0 - 2.0 * t)            # smoothstep, 1 inside -> 0 outside
+    anchor = np.array([cx, cy, cz], dtype=np.float64)
+    dists = np.linalg.norm(xyz_subset - anchor, axis=1)
+    t = np.clip((dists - r_in) / (r_out - r_in), 0.0, 1.0)
+    factor = 1.0 - t * t * (3.0 - 2.0 * t)          # smoothstep, 1 inside -> 0 outside
     if invert:
-        mask = 1.0 - mask
-    return mask.astype(np.float64)
+        factor = 1.0 - factor
+    return factor.astype(np.float64)
 
 
 def _sample_order(order, pct, seed, weights=None):
@@ -362,6 +409,8 @@ def layer_base_splat(cfg, G, mean2d, cov2d, depths, keep, spec):
     bg = _resolve_bg(spec)
     saturation = float(spec.get("saturation", 1.0))
     curvature_weight = float(spec.get("curvature_weight", 0.0))
+    depth_focus = float(spec.get("depth_focus", 0.5))
+    depth_blur = float(spec.get("depth_blur", 0.0))
 
     order = keep[np.argsort(-depths[keep])]
 
@@ -370,15 +419,48 @@ def layer_base_splat(cfg, G, mean2d, cov2d, depths, keep, spec):
     if curvature_weight > 0.0 and curvature_full is not None:
         c = curvature_full[order]
         c_norm = c / (c.max() + 1e-9)
-        # Blend: uniform (1) + curvature emphasis. weight=1 -> nearly pure
-        # curvature; weight=0 -> uniform (unused, falls through).
         weights = (1.0 - curvature_weight) + curvature_weight * c_norm
 
     order = _sample_order(order, point_pct, seed, weights=weights)
+
+    # Per-gaussian opacity modulation: 3D mask (if enabled) and depth-of-field
+    # fade. Done by COPYING G["opacities"] and (when blurring) cov2d, then
+    # scaling only the indices we're about to render. Memory cost is bounded
+    # by len(order) but easiest to copy the full arrays once.
+    ops_eff = G["opacities"]
+    cov2d_eff = cov2d
+    tags = []
+
+    mask3d = _mask3d_factors(G["xyz"][order], spec)
+    if mask3d is not None:
+        ops_eff = ops_eff.copy()
+        ops_eff[order] = ops_eff[order] * mask3d
+        tags.append("mask3d")
+
+    if depth_blur > 0.0:
+        vis_depths = depths[order]
+        d_lo, d_hi = float(vis_depths.min()), float(vis_depths.max())
+        focus_d = d_lo + np.clip(depth_focus, 0.0, 1.0) * (d_hi - d_lo)
+        drange = max(d_hi - d_lo, 1e-6)
+        dist = np.abs(vis_depths - focus_d) / drange     # in [0, 1]
+        blur_f = depth_blur * dist                        # 0 in focus, larger off-focus
+        # Variance scales by (1 + f)^2 -> sigma scales by (1 + f).
+        sigma_scale = (1.0 + 3.0 * blur_f)                # 3x amplifies the look
+        cov2d_eff = cov2d_eff.copy()
+        cov2d_eff[order] = cov2d_eff[order] * (sigma_scale[:, None, None] ** 2)
+        # And fade alpha: out-of-focus contributes less per stamp.
+        alpha_fade = np.clip(1.0 - 0.7 * blur_f, 0.05, 1.0)
+        if ops_eff is G["opacities"]:
+            ops_eff = ops_eff.copy()
+        ops_eff[order] = ops_eff[order] * alpha_fade
+        tags.append(f"dof(f={depth_focus:.2f},b={depth_blur:.2f})")
+
     cw_tag = f"  cw={curvature_weight:.2f}" if weights is not None else ""
+    extra = ("  [" + ", ".join(tags) + "]") if tags else ""
     print(f"  base_splat: {len(order)} / {len(keep)} visible points "
-          f"({point_pct:.2%})  bg={[f'{c:.2f}' for c in bg]}  sat={saturation:.2f}{cw_tag}")
-    img = splat(cfg.W, cfg.H, mean2d, cov2d, G["colors"], G["opacities"],
+          f"({point_pct:.2%})  bg={[f'{c:.2f}' for c in bg]}  "
+          f"sat={saturation:.2f}{cw_tag}{extra}")
+    img = splat(cfg.W, cfg.H, mean2d, cov2d_eff, G["colors"], ops_eff,
                 order, bg=bg, verbose=False)
     img = _apply_saturation(img, saturation)
     alpha = np.ones((cfg.H, cfg.W), dtype=np.float64)
@@ -439,6 +521,11 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
     tree3d = cKDTree(xyz)
     weights = _placement_weights(pts, ops, saliency, params["PLACEMENT"],
                                   curvature=curvature_kept)
+    # 3D-ball mask multiplies placement weights so walkers seed (and mostly
+    # stay) inside the ball. Epsilon keeps a small chance outside.
+    mask3d_walks = _mask3d_factors(xyz, spec)
+    if mask3d_walks is not None:
+        weights = weights * (mask3d_walks + 0.04)
     weights = weights / weights.sum()
 
     direction_field = None
@@ -536,9 +623,10 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
     return line_canvas, alpha
 
 
-_HASH_EXCLUDE = ({"enabled", "alpha", "name",
-                  "_ui_y", "_ui_h", "_ui_collapsed", "_ui_section"}
-                 | _FOCAL_KEYS)   # focal is applied at composite time, not baked in
+_HASH_EXCLUDE = {"enabled", "alpha", "name",
+                 "_ui_y", "_ui_h", "_ui_collapsed", "_ui_section"}
+# Note: mask3d_*, depth_*, curvature_* all affect the layer's intrinsic render,
+# so they DO bust the cache. No exclusion.
 
 
 def _canonicalize(obj):
@@ -562,12 +650,22 @@ def layer_content_hash(spec):
 
 def _build_png_metadata(cfg, composition):
     """Build a metadata dict to embed in PNG file.
-    
-    Returns a dict with scene name, composition parameters, and render info.
-    Can be serialized to JSON for tEXt chunk storage.
+
+    Captures everything needed to reproduce the render: scene name, the camera
+    that was actually used (live cfg values at render time, NOT the on-disk
+    scene JSON which may be stale), and the composition. Stored as a single
+    JSON string in a `composition` tEXt chunk so show_scene.py can fetch it.
     """
     metadata = {
         "scene_name": cfg.SCENE_NAME,
+        "camera": {
+            "elev_deg":    float(getattr(cfg, "ELEV_DEG", 0.0)),
+            "azim_deg":    float(getattr(cfg, "AZIM_DEG", 0.0)),
+            "fov_deg":     float(getattr(cfg, "FOV_DEG", 28.0)),
+            "distance_k":  float(getattr(cfg, "DISTANCE_K", 1.5)),
+            "head_bias_x": float(getattr(cfg, "HEAD_BIAS_X", 0.0)),
+            "head_bias_y": float(getattr(cfg, "HEAD_BIAS_Y", 0.0)),
+        },
         "composition": composition,
     }
     return metadata
@@ -674,10 +772,24 @@ def build_scene_data(scene_ref):
     _compute_curvature(cfg, G)
     eff_n = len(G["xyz"])
     suffix = f" (from {raw_n})" if eff_n != raw_n else ""
+    bb_min = G["xyz"].min(axis=0)
+    bb_max = G["xyz"].max(axis=0)
+    bb_ctr = (bb_min + bb_max) / 2.0
+    # Per-axis 10-90% quantile bbox -- where most points live (helps spot the
+    # head vs sparse outliers).
+    dens_lo = np.quantile(G["xyz"], 0.1, axis=0)
+    dens_hi = np.quantile(G["xyz"], 0.9, axis=0)
     print(f"[layers] scene={cfg.SCENE_NAME} ply={cfg.PLY} "
           f"gaussians={eff_n}{suffix}")
+    print(f"[layers] bbox  x=[{bb_min[0]:+.3f}, {bb_max[0]:+.3f}]  "
+          f"y=[{bb_min[1]:+.3f}, {bb_max[1]:+.3f}]  "
+          f"z=[{bb_min[2]:+.3f}, {bb_max[2]:+.3f}]  "
+          f"centre=({bb_ctr[0]:+.3f}, {bb_ctr[1]:+.3f}, {bb_ctr[2]:+.3f})")
+    print(f"[layers] dense x=[{dens_lo[0]:+.3f}, {dens_hi[0]:+.3f}]  "
+          f"y=[{dens_lo[1]:+.3f}, {dens_hi[1]:+.3f}]  "
+          f"z=[{dens_lo[2]:+.3f}, {dens_hi[2]:+.3f}]  (10-90% per axis)")
     t0 = time.time()
-    mean2d, cov2d, depths, keep = _project_scene(cfg, G)
+    mean2d, cov2d, depths, keep, camera = _project_scene(cfg, G)
     print(f"[layers] projected {len(keep)} visible in {time.time() - t0:.1f}s")
 
     ref_source = cfg.OUT if os.path.exists(cfg.OUT) else None
@@ -692,6 +804,8 @@ def build_scene_data(scene_ref):
         cfg=cfg, G=G,
         mean2d=mean2d, cov2d=cov2d, depths=depths, keep=keep,
         ref_img=ref_img, saliency=saliency,
+        camera=camera, bbox=(bb_min, bb_max),
+        density_bbox=(dens_lo, dens_hi),
     )
 
 
@@ -755,12 +869,9 @@ def render_composition(scene_ref, composition=None, write=True, stamp_label=True
                     else:
                         layer_cache.pop(next(iter(layer_cache)))
 
-        focal = _focal_mask(cfg.W, cfg.H, spec)
-        composite_alpha = alpha if focal is None else alpha * focal
-        canvas = _over(canvas, color, composite_alpha,
+        canvas = _over(canvas, color, alpha,
                        layer_alpha=float(spec.get("alpha", 1.0)))
-        focal_tag = "  [focal]" if focal is not None else ""
-        print(f"  layer {layer_name}: on ({time.time() - t_layer:.1f}s){focal_tag}")
+        print(f"  layer {layer_name}: on ({time.time() - t_layer:.1f}s)")
 
     if stamp_label:
         canvas = stamp(canvas, f"{cfg.SCENE_NAME} layers", cfg.W, cfg.H)

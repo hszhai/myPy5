@@ -21,6 +21,20 @@ from PIL import Image
 def _print_summary(data, png_path):
     print(f"file:    {png_path}")
     print(f"scene:   {data.get('scene_name', '?')}")
+
+    cam = data.get("camera")
+    if cam:
+        parts = [
+            f"elev={cam.get('elev_deg', '?'):g}",
+            f"azim={cam.get('azim_deg', '?'):g}",
+            f"fov={cam.get('fov_deg', '?'):g}",
+            f"dist·k={cam.get('distance_k', '?'):g}",
+        ]
+        bx, by = cam.get("head_bias_x", 0.0), cam.get("head_bias_y", 0.0)
+        if bx or by:
+            parts.append(f"bias=({bx:g}, {by:g})")
+        print(f"camera:  {'  '.join(parts)}")
+
     comp = data.get("composition", {})
     if "out" in comp:
         print(f"out:     {comp['out']}")

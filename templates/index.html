@@ -1,277 +1,155 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tune Layers</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        'slate': {
-                            '900': '#0f172a',
-                            '800': '#1e293b',
-                            '700': '#334155',
-                            '600': '#475569',
-                        }
-                    }
-                }
-            }
-        }
-    </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>layers</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+          },
+          colors: {
+            ink:   '#f4f4f5',
+            faint: '#d4d4d8',
+            mute:  '#a1a1aa',
+            line:  '#27272a',
+            surf:  '#18181b',
+            base:  '#09090b',
+            accent:'#fafafa',
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    html, body { height: 100%; }
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    input, select { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { appearance: textfield; }
+    *::-webkit-scrollbar { width: 6px; height: 6px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
+    *::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+    /* Slim checkbox style */
+    input[type=checkbox] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px; height: 14px; border-radius: 3px;
+      border: 1px solid #3f3f46; background: #09090b;
+      cursor: pointer; position: relative; top: 1px;
+    }
+    input[type=checkbox]:checked { background: #e4e4e7; border-color: #e4e4e7; }
+    input[type=checkbox]:checked::after {
+      content: ''; position: absolute; left: 4px; top: 1px;
+      width: 4px; height: 8px; border: solid #09090b;
+      border-width: 0 2px 2px 0; transform: rotate(45deg);
+    }
+  </style>
 </head>
-<body class="bg-slate-900 text-slate-100 font-mono text-sm">
-    <div class="min-h-screen flex flex-col">
-        <!-- Header -->
-        <div class="bg-slate-800 border-b border-slate-700 px-4 py-3">
-            <h1 class="text-lg font-bold text-slate-100">Layers</h1>
-            <div id="sceneInfo" class="text-xs text-slate-400 mt-1"></div>
+<body class="bg-base text-ink antialiased text-[14px] h-screen">
+  <div class="h-full flex flex-col">
+    <!-- Top bar -->
+    <header class="px-4 py-2 border-b border-line flex items-center justify-between shrink-0">
+      <div class="flex items-center gap-3">
+        <span class="font-medium tracking-tight text-ink">layers</span>
+        <span id="scene-name" class="text-mute text-[13px] font-mono"></span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="render-status" class="text-mute text-[12px] font-mono mr-2"></span>
+        <button type="button" id="btn-reload" class="px-3 py-1 text-[13px] border border-line rounded hover:bg-surf text-faint hover:text-ink transition" title="re-read scene JSON from disk">reload</button>
+        <button type="button" id="btn-save" class="px-3 py-1 text-[13px] border border-line rounded hover:bg-surf text-faint hover:text-ink transition">save scene</button>
+        <button type="button" id="btn-save-img" class="px-3 py-1 text-[13px] border border-line rounded hover:bg-surf text-faint hover:text-ink transition" title="copy current render to a timestamped PNG (metadata embedded)">save image</button>
+        <button type="button" id="btn-render" class="px-3 py-1 text-[13px] bg-surf border border-line rounded hover:border-faint text-ink transition">render (r)</button>
+      </div>
+    </header>
+
+    <!-- 3 columns -->
+    <main class="flex-1 grid grid-cols-[1fr,360px,360px] gap-3 p-3 overflow-hidden min-h-0">
+
+      <!-- Left: render preview -->
+      <section class="bg-surf border border-line rounded flex flex-col overflow-hidden min-h-0">
+        <div class="px-3 py-2 border-b border-line text-[13px] text-faint">preview</div>
+        <div id="preview-wrap" class="flex-1 flex items-center justify-center p-3 overflow-hidden min-h-0">
+          <img id="preview-image" alt="" class="max-w-full max-h-full hidden" />
+          <span id="preview-placeholder" class="text-mute text-[13px] font-mono">press render</span>
+        </div>
+      </section>
+
+      <!-- Middle: layers -->
+      <section class="bg-surf border border-line rounded flex flex-col overflow-hidden min-h-0">
+        <div class="px-3 py-2 border-b border-line text-[13px] text-faint flex items-center justify-between">
+          <span>layers</span>
+          <div class="flex gap-1">
+            <button type="button" data-add="base_splat"    class="px-2 py-0.5 text-[12px] border border-line rounded hover:bg-line text-mute hover:text-ink transition">+ splat</button>
+            <button type="button" data-add="surface_walks" class="px-2 py-0.5 text-[12px] border border-line rounded hover:bg-line text-mute hover:text-ink transition">+ walks</button>
+          </div>
+        </div>
+        <div id="layers-list" class="flex-1 overflow-y-auto p-2 space-y-2 min-h-0"></div>
+      </section>
+
+      <!-- Right: bbox (with camera below) + log -->
+      <section class="flex flex-col gap-3 overflow-hidden min-h-0">
+        <!-- Bbox wireframe -->
+        <div class="bg-surf border border-line rounded flex flex-col">
+          <div class="px-3 py-2 border-b border-line text-[13px] text-faint flex items-center justify-between">
+            <span>bbox</span>
+            <span id="bbox-info" class="text-mute text-[12px] font-mono"></span>
+          </div>
+          <div id="bbox-wrap" class="relative h-80">
+            <canvas id="bbox-canvas" class="block w-full h-full"></canvas>
+          </div>
+          <!-- Camera -->
+          <div class="border-t border-line p-3">
+            <div class="grid grid-cols-2 gap-x-3 gap-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <label for="cam-elev" class="text-mute text-[12px]">elev</label>
+                <input id="cam-elev" type="number" step="1" title="elevation (degrees)" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint" />
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <label for="cam-azim" class="text-mute text-[12px]">azim</label>
+                <input id="cam-azim" type="number" step="1" title="azimuth (degrees)" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint" />
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <label for="cam-fov" class="text-mute text-[12px]">fov</label>
+                <input id="cam-fov" type="number" step="1" title="field of view (degrees)" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint" />
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <label for="cam-dist" class="text-mute text-[12px]">dist·k</label>
+                <input id="cam-dist" type="number" step="0.05" title="distance multiplier" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint" />
+              </div>
+            </div>
+            <div class="text-[11px] text-mute pt-2">drag bbox to orbit · scroll to zoom · release commits to render</div>
+          </div>
         </div>
 
-        <!-- Main Layout: 3 columns -->
-        <div class="flex-1 flex overflow-hidden gap-4 p-4">
-            
-            <!-- Left: Control Panel -->
-            <div class="w-80 flex flex-col gap-4 overflow-y-auto">
-                <!-- Action Buttons -->
-                <div class="flex gap-2">
-                    <button id="btnRender" onclick="doRender()" class="flex-1 bg-red-700 hover:bg-red-600 px-3 py-2 rounded font-bold transition">RENDER</button>
-                    <button id="btnSave" onclick="doSaveScene()" class="flex-1 bg-blue-700 hover:bg-blue-600 px-3 py-2 rounded font-bold transition">SAVE</button>
-                </div>
-                <div class="flex gap-2">
-                    <button id="btnAddSplat" onclick="doAddLayer('base_splat')" class="flex-1 bg-emerald-700 hover:bg-emerald-600 px-3 py-2 rounded text-xs transition">+ SPLAT</button>
-                    <button id="btnAddWalks" onclick="doAddLayer('surface_walks')" class="flex-1 bg-emerald-700 hover:bg-emerald-600 px-3 py-2 rounded text-xs transition">+ WALKS</button>
-                </div>
-
-                <!-- Layers List -->
-                <div id="layersList" class="flex flex-col gap-3">
-                    <!-- Dynamically populated -->
-                </div>
-            </div>
-
-            <!-- Center: Preview & Info -->
-            <div class="flex-1 flex flex-col gap-4 min-w-0">
-                <!-- Preview -->
-                <div class="flex-1 bg-slate-800 rounded border border-slate-700 overflow-hidden flex flex-col">
-                    <div class="bg-slate-750 px-3 py-2 border-b border-slate-700 text-xs font-semibold">Preview</div>
-                    <div class="flex-1 flex items-center justify-center p-4">
-                        <img id="previewImage" src="" alt="Render preview" class="max-w-full max-h-full rounded">
-                        <div id="previewPlaceholder" class="text-slate-500 text-center">
-                            <p class="text-sm">(press RENDER)</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Right: Camera + Wireframe + Log -->
-            <div class="w-96 flex flex-col gap-4 overflow-y-auto">
-                
-                <!-- Camera Controls -->
-                <div class="bg-slate-800 rounded border border-slate-700 p-3">
-                    <div class="text-xs font-semibold mb-3 text-slate-300">Camera</div>
-                    <div class="space-y-2 text-xs">
-                        <div class="flex justify-between">
-                            <label>Azimuth:</label>
-                            <input id="camAzimuth" type="number" step="1" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="0">
-                            <span class="text-slate-500">°</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <label>Elevation:</label>
-                            <input id="camElevation" type="number" step="1" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="0">
-                            <span class="text-slate-500">°</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <label>FOV:</label>
-                            <input id="camFov" type="number" step="0.5" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="40">
-                            <span class="text-slate-500">°</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <label>Distance K:</label>
-                            <input id="camDistanceK" type="number" step="0.1" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="1.0">
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Wireframe (placeholder) -->
-                <div class="bg-slate-800 rounded border border-slate-700 p-3 h-40">
-                    <div class="text-xs font-semibold mb-2 text-slate-300">Wireframe</div>
-                    <canvas id="wireframeCanvas" class="w-full h-32 bg-slate-900 rounded"></canvas>
-                </div>
-
-                <!-- Log -->
-                <div class="bg-slate-800 rounded border border-slate-700 p-3 flex-1 min-h-0 flex flex-col">
-                    <div class="text-xs font-semibold mb-2 text-slate-300">Log</div>
-                    <div id="logPanel" class="flex-1 overflow-y-auto bg-slate-900 rounded p-2 text-xs text-slate-400 font-mono">
-                        <div id="logContent"></div>
-                    </div>
-                </div>
-            </div>
+        <!-- Log -->
+        <div class="bg-surf border border-line rounded flex flex-col flex-1 min-h-0">
+          <div class="px-3 py-2 border-b border-line text-[13px] text-faint">log</div>
+          <pre id="log" class="flex-1 overflow-y-auto p-3 text-[12px] text-mute font-mono leading-relaxed whitespace-pre-wrap"></pre>
         </div>
-    </div>
+      </section>
 
-    <script>
-        let appState = {};
+    </main>
+  </div>
 
-        // Load initial state
-        async function loadState() {
-            const res = await fetch("/api/state");
-            appState = await res.json();
-            renderUI();
-        }
-
-        // Render UI based on current state
-        function renderUI() {
-            // Scene info
-            const { bbox_min, bbox_max } = appState.scene;
-            document.getElementById("sceneInfo").textContent = 
-                `scene x:[${bbox_min[0].toFixed(2)}, ${bbox_max[0].toFixed(2)}] ` +
-                `y:[${bbox_min[1].toFixed(2)}, ${bbox_max[1].toFixed(2)}] ` +
-                `z:[${bbox_min[2].toFixed(2)}, ${bbox_max[2].toFixed(2)}]`;
-
-            // Camera controls
-            document.getElementById("camAzimuth").value = appState.camera.azimuth.toFixed(1);
-            document.getElementById("camElevation").value = appState.camera.elevation.toFixed(1);
-            document.getElementById("camFov").value = appState.camera.fov.toFixed(1);
-            document.getElementById("camDistanceK").value = appState.camera.distance_k.toFixed(2);
-
-            // Layers
-            renderLayers();
-
-            // Log
-            updateLog();
-        }
-
-        function renderLayers() {
-            const container = document.getElementById("layersList");
-            container.innerHTML = "";
-            
-            if (!appState.composition.layers || appState.composition.layers.length === 0) {
-                container.innerHTML = '<div class="text-slate-500 text-xs">No layers yet. Add one with + SPLAT or + WALKS.</div>';
-                return;
-            }
-
-            appState.composition.layers.forEach((layer, i) => {
-                const div = document.createElement("div");
-                div.className = "bg-slate-800 rounded border border-slate-700 p-3";
-                
-                const header = `
-                    <div class="flex items-center justify-between mb-2">
-                        <input type="checkbox" ${layer.enabled ? 'checked' : ''} 
-                               onchange="toggleLayer(${i}, this.checked)"
-                               class="w-4 h-4 cursor-pointer">
-                        <span class="font-bold flex-1 ml-2">${layer.name}</span>
-                        <span class="text-xs text-slate-500">${layer.type}</span>
-                    </div>
-                    <input type="range" min="0" max="1" step="0.01" value="${layer.alpha || 0.5}"
-                           onchange="updateLayerAlpha(${i}, this.value)"
-                           class="w-full h-1 bg-slate-700 rounded cursor-pointer">
-                    <div class="text-xs text-slate-500 mt-1">α: ${(layer.alpha || 0.5).toFixed(2)}</div>
-                `;
-                
-                div.innerHTML = header;
-                container.appendChild(div);
-            });
-        }
-
-        function updateLog() {
-            const logContent = document.getElementById("logContent");
-            logContent.innerHTML = appState.log
-                .map(line => `<div>${escapeHtml(line)}</div>`)
-                .join("");
-            logContent.parentElement.scrollTop = logContent.parentElement.scrollHeight;
-        }
-
-        function escapeHtml(text) {
-            const map = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'};
-            return text.replace(/[&<>"']/g, m => map[m]);
-        }
-
-        async function doRender() {
-            document.getElementById("btnRender").disabled = true;
-            document.getElementById("btnRender").textContent = "RENDERING...";
-            
-            try {
-                const res = await fetch("/api/render", { method: "POST" });
-                const result = await res.json();
-                
-                if (result.output) {
-                    document.getElementById("previewImage").src = result.output + "?t=" + Date.now();
-                    document.getElementById("previewPlaceholder").style.display = "none";
-                }
-                
-                appState.log = result.log || [];
-                updateLog();
-            } catch (e) {
-                console.error("Render failed:", e);
-                appState.log.push("Error: " + e.message);
-                updateLog();
-            } finally {
-                document.getElementById("btnRender").disabled = false;
-                document.getElementById("btnRender").textContent = "RENDER";
-            }
-        }
-
-        async function doSaveScene() {
-            try {
-                const res = await fetch("/api/save_scene", { method: "POST" });
-                const result = await res.json();
-                appState.log.push("Scene saved: " + result.path);
-                updateLog();
-            } catch (e) {
-                console.error("Save failed:", e);
-            }
-        }
-
-        async function doAddLayer(type) {
-            try {
-                const res = await fetch("/api/add_layer", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ type })
-                });
-                const result = await res.json();
-                appState.composition.layers = appState.composition.layers || [];
-                appState.composition.layers.push(result.layer);
-                renderLayers();
-            } catch (e) {
-                console.error("Add layer failed:", e);
-            }
-        }
-
-        async function toggleLayer(i, enabled) {
-            appState.composition.layers[i].enabled = enabled;
-            await fetch("/api/state", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ composition: appState.composition })
-            });
-        }
-
-        async function updateLayerAlpha(i, alpha) {
-            appState.composition.layers[i].alpha = parseFloat(alpha);
-            await fetch("/api/state", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ composition: appState.composition })
-            });
-            renderLayers();
-        }
-
-        // Keyboard shortcuts
-        document.addEventListener("keydown", (e) => {
-            if (e.key === "r" && !e.ctrlKey && !e.metaKey) {
-                doRender();
-            } else if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
-                e.preventDefault();
-                doSaveScene();
-            }
-        });
-
-        // Initialize
-        loadState();
-        setInterval(loadState, 2000);  // Auto-refresh every 2s
-    </script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

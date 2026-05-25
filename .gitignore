@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# JVM crash logs
+hs_err_pid*
+
+# Auto-generated timestamped renders (save-image copies)
+images/*_20*.png
