@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tune Layers</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'slate': {
+                            '900': '#0f172a',
+                            '800': '#1e293b',
+                            '700': '#334155',
+                            '600': '#475569',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-mono text-sm">
+    <div class="min-h-screen flex flex-col">
+        <!-- Header -->
+        <div class="bg-slate-800 border-b border-slate-700 px-4 py-3">
+            <h1 class="text-lg font-bold text-slate-100">Layers</h1>
+            <div id="sceneInfo" class="text-xs text-slate-400 mt-1"></div>
+        </div>
+
+        <!-- Main Layout: 3 columns -->
+        <div class="flex-1 flex overflow-hidden gap-4 p-4">
+            
+            <!-- Left: Control Panel -->
+            <div class="w-80 flex flex-col gap-4 overflow-y-auto">
+                <!-- Action Buttons -->
+                <div class="flex gap-2">
+                    <button id="btnRender" onclick="doRender()" class="flex-1 bg-red-700 hover:bg-red-600 px-3 py-2 rounded font-bold transition">RENDER</button>
+                    <button id="btnSave" onclick="doSaveScene()" class="flex-1 bg-blue-700 hover:bg-blue-600 px-3 py-2 rounded font-bold transition">SAVE</button>
+                </div>
+                <div class="flex gap-2">
+                    <button id="btnAddSplat" onclick="doAddLayer('base_splat')" class="flex-1 bg-emerald-700 hover:bg-emerald-600 px-3 py-2 rounded text-xs transition">+ SPLAT</button>
+                    <button id="btnAddWalks" onclick="doAddLayer('surface_walks')" class="flex-1 bg-emerald-700 hover:bg-emerald-600 px-3 py-2 rounded text-xs transition">+ WALKS</button>
+                </div>
+
+                <!-- Layers List -->
+                <div id="layersList" class="flex flex-col gap-3">
+                    <!-- Dynamically populated -->
+                </div>
+            </div>
+
+            <!-- Center: Preview & Info -->
+            <div class="flex-1 flex flex-col gap-4 min-w-0">
+                <!-- Preview -->
+                <div class="flex-1 bg-slate-800 rounded border border-slate-700 overflow-hidden flex flex-col">
+                    <div class="bg-slate-750 px-3 py-2 border-b border-slate-700 text-xs font-semibold">Preview</div>
+                    <div class="flex-1 flex items-center justify-center p-4">
+                        <img id="previewImage" src="" alt="Render preview" class="max-w-full max-h-full rounded">
+                        <div id="previewPlaceholder" class="text-slate-500 text-center">
+                            <p class="text-sm">(press RENDER)</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: Camera + Wireframe + Log -->
+            <div class="w-96 flex flex-col gap-4 overflow-y-auto">
+                
+                <!-- Camera Controls -->
+                <div class="bg-slate-800 rounded border border-slate-700 p-3">
+                    <div class="text-xs font-semibold mb-3 text-slate-300">Camera</div>
+                    <div class="space-y-2 text-xs">
+                        <div class="flex justify-between">
+                            <label>Azimuth:</label>
+                            <input id="camAzimuth" type="number" step="1" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="0">
+                            <span class="text-slate-500">°</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <label>Elevation:</label>
+                            <input id="camElevation" type="number" step="1" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="0">
+                            <span class="text-slate-500">°</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <label>FOV:</label>
+                            <input id="camFov" type="number" step="0.5" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="40">
+                            <span class="text-slate-500">°</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <label>Distance K:</label>
+                            <input id="camDistanceK" type="number" step="0.1" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-right text-slate-100" value="1.0">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Wireframe (placeholder) -->
+                <div class="bg-slate-800 rounded border border-slate-700 p-3 h-40">
+                    <div class="text-xs font-semibold mb-2 text-slate-300">Wireframe</div>
+                    <canvas id="wireframeCanvas" class="w-full h-32 bg-slate-900 rounded"></canvas>
+                </div>
+
+                <!-- Log -->
+                <div class="bg-slate-800 rounded border border-slate-700 p-3 flex-1 min-h-0 flex flex-col">
+                    <div class="text-xs font-semibold mb-2 text-slate-300">Log</div>
+                    <div id="logPanel" class="flex-1 overflow-y-auto bg-slate-900 rounded p-2 text-xs text-slate-400 font-mono">
+                        <div id="logContent"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let appState = {};
+
+        // Load initial state
+        async function loadState() {
+            const res = await fetch("/api/state");
+            appState = await res.json();
+            renderUI();
+        }
+
+        // Render UI based on current state
+        function renderUI() {
+            // Scene info
+            const { bbox_min, bbox_max } = appState.scene;
+            document.getElementById("sceneInfo").textContent = 
+                `scene x:[${bbox_min[0].toFixed(2)}, ${bbox_max[0].toFixed(2)}] ` +
+                `y:[${bbox_min[1].toFixed(2)}, ${bbox_max[1].toFixed(2)}] ` +
+                `z:[${bbox_min[2].toFixed(2)}, ${bbox_max[2].toFixed(2)}]`;
+
+            // Camera controls
+            document.getElementById("camAzimuth").value = appState.camera.azimuth.toFixed(1);
+            document.getElementById("camElevation").value = appState.camera.elevation.toFixed(1);
+            document.getElementById("camFov").value = appState.camera.fov.toFixed(1);
+            document.getElementById("camDistanceK").value = appState.camera.distance_k.toFixed(2);
+
+            // Layers
+            renderLayers();
+
+            // Log
+            updateLog();
+        }
+
+        function renderLayers() {
+            const container = document.getElementById("layersList");
+            container.innerHTML = "";
+            
+            if (!appState.composition.layers || appState.composition.layers.length === 0) {
+                container.innerHTML = '<div class="text-slate-500 text-xs">No layers yet. Add one with + SPLAT or + WALKS.</div>';
+                return;
+            }
+
+            appState.composition.layers.forEach((layer, i) => {
+                const div = document.createElement("div");
+                div.className = "bg-slate-800 rounded border border-slate-700 p-3";
+                
+                const header = `
+                    <div class="flex items-center justify-between mb-2">
+                        <input type="checkbox" ${layer.enabled ? 'checked' : ''} 
+                               onchange="toggleLayer(${i}, this.checked)"
+                               class="w-4 h-4 cursor-pointer">
+                        <span class="font-bold flex-1 ml-2">${layer.name}</span>
+                        <span class="text-xs text-slate-500">${layer.type}</span>
+                    </div>
+                    <input type="range" min="0" max="1" step="0.01" value="${layer.alpha || 0.5}"
+                           onchange="updateLayerAlpha(${i}, this.value)"
+                           class="w-full h-1 bg-slate-700 rounded cursor-pointer">
+                    <div class="text-xs text-slate-500 mt-1">α: ${(layer.alpha || 0.5).toFixed(2)}</div>
+                `;
+                
+                div.innerHTML = header;
+                container.appendChild(div);
+            });
+        }
+
+        function updateLog() {
+            const logContent = document.getElementById("logContent");
+            logContent.innerHTML = appState.log
+                .map(line => `<div>${escapeHtml(line)}</div>`)
+                .join("");
+            logContent.parentElement.scrollTop = logContent.parentElement.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const map = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'};
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
+
+        async function doRender() {
+            document.getElementById("btnRender").disabled = true;
+            document.getElementById("btnRender").textContent = "RENDERING...";
+            
+            try {
+                const res = await fetch("/api/render", { method: "POST" });
+                const result = await res.json();
+                
+                if (result.output) {
+                    document.getElementById("previewImage").src = result.output + "?t=" + Date.now();
+                    document.getElementById("previewPlaceholder").style.display = "none";
+                }
+                
+                appState.log = result.log || [];
+                updateLog();
+            } catch (e) {
+                console.error("Render failed:", e);
+                appState.log.push("Error: " + e.message);
+                updateLog();
+            } finally {
+                document.getElementById("btnRender").disabled = false;
+                document.getElementById("btnRender").textContent = "RENDER";
+            }
+        }
+
+        async function doSaveScene() {
+            try {
+                const res = await fetch("/api/save_scene", { method: "POST" });
+                const result = await res.json();
+                appState.log.push("Scene saved: " + result.path);
+                updateLog();
+            } catch (e) {
+                console.error("Save failed:", e);
+            }
+        }
+
+        async function doAddLayer(type) {
+            try {
+                const res = await fetch("/api/add_layer", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ type })
+                });
+                const result = await res.json();
+                appState.composition.layers = appState.composition.layers || [];
+                appState.composition.layers.push(result.layer);
+                renderLayers();
+            } catch (e) {
+                console.error("Add layer failed:", e);
+            }
+        }
+
+        async function toggleLayer(i, enabled) {
+            appState.composition.layers[i].enabled = enabled;
+            await fetch("/api/state", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ composition: appState.composition })
+            });
+        }
+
+        async function updateLayerAlpha(i, alpha) {
+            appState.composition.layers[i].alpha = parseFloat(alpha);
+            await fetch("/api/state", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ composition: appState.composition })
+            });
+            renderLayers();
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "r" && !e.ctrlKey && !e.metaKey) {
+                doRender();
+            } else if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                doSaveScene();
+            }
+        });
+
+        // Initialize
+        loadState();
+        setInterval(loadState, 2000);  // Auto-refresh every 2s
+    </script>
+</body>
+</html>
