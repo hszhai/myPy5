@@ -494,20 +494,41 @@ async function doRender() {
     };
     console.log('[doRender] sending camera:', camera);
     CAMERA = camera;
-    const data = await api('/api/render', {
+
+    // Create async render job
+    const createRes = await api('/api/render', {
       method: 'POST',
       body: { camera, composition: COMPOSITION },
     });
-    const img = $('preview-image');
-    img.src = data.image;
-    img.classList.remove('hidden');
-    $('preview-placeholder').classList.add('hidden');
-    $('render-status').textContent = `${data.time.toFixed(1)}s`;
-    if (data.log) appendLog(data.log.join('\n'));
+    const jobId = createRes.job_id;
+
+    // Poll for completion
+    const poll = async () => {
+      const statusRes = await api(`/api/render/status/${jobId}`);
+      const job = statusRes.job;
+
+      if (job.status === 'done') {
+        const img = $('preview-image');
+        img.src = job.image;
+        img.classList.remove('hidden');
+        $('preview-placeholder').classList.add('hidden');
+        $('render-status').textContent = `${(job.time || 0).toFixed(1)}s`;
+        if (statusRes.log) appendLog(statusRes.log.join('\n'));
+        btn.disabled = false;
+      } else if (job.status === 'error') {
+        $('render-status').textContent = 'failed';
+        appendLog('render failed: ' + (job.error || 'unknown error'));
+        btn.disabled = false;
+      } else {
+        // Still pending — poll again in 1.5s
+        setTimeout(poll, 1500);
+      }
+    };
+
+    setTimeout(poll, 500);
   } catch (err) {
     $('render-status').textContent = 'failed';
     appendLog('render failed: ' + err.message);
-  } finally {
     btn.disabled = false;
   }
 }

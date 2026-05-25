@@ -12,8 +12,10 @@ import contextlib
 import io
 import json
 import os
+import threading
 import time
 import traceback
+import uuid
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
@@ -299,106 +301,152 @@ class RemoteRenderError(Exception):
     pass
 
 
-def _remote_render(payload):
-    """Forward a render request to REMOTE_RENDER_URL and save the returned
-    PNG locally so the frontend can fetch it via /img/..."""
-    resp = requests.post(
-        f"{REMOTE_RENDER_URL}/api/render",
-        json=payload,
-        timeout=300,
-    )
-    if not resp.ok:
-        try:
-            detail = resp.json().get("error", resp.text)
-        except Exception:
-            detail = resp.text
-        raise RemoteRenderError(f"remote error ({resp.status_code}): {detail}")
-
-    ts = int(time.time())
-    filename = f"{cfg.SCENE_NAME}_remote_{ts}.png"
-    local_path = Path(__file__).parent / "images" / filename
-    local_path.write_bytes(resp.content)
-
-    global last_render_path
-    last_render_path = str(local_path)
-    _append_log(f"remote render -> {last_render_path}")
-
-    return jsonify({
-        "ok": True,
-        "image": f"/img/{filename}?t={ts}",
-        "time": 0,
-        "log": log_lines[-50:],
-    })
+# Async job tracking for local renders
+_local_jobs = OrderedDict()
+_MAX_LOCAL_JOBS = 5
+_render_lock = threading.Lock()
 
 
-@app.route("/api/render", methods=["POST"])
-def api_render():
-    """Render with the live composition and camera.
+def _prune_local_jobs():
+    while len(_local_jobs) > _MAX_LOCAL_JOBS:
+        _local_jobs.popitem(last=False)
 
-    Accepts optional `camera` and `composition` in the request body. When
-    present, they OVERRIDE whatever's in memory -- the UI is the source of
-    truth for the render. After overrides land, we reproject whenever
-    _apply_camera_override actually mutated cfg.
 
-    If REMOTE_RENDER_URL is configured, the render is offloaded to the remote
-    server; on failure it falls back to local rendering automatically.
-    """
-    global last_render_path, composition, _projected_camera
-    payload = request.get_json() or {}
-    cam_changed = False
-    if "camera" in payload:
-        cam_changed = _apply_camera_override(payload["camera"])
-    if "composition" in payload:
-        composition = payload["composition"]
-
-    # Try remote render first if configured
-    if REMOTE_RENDER_URL:
-        try:
-            return _remote_render(payload)
-        except RemoteRenderError as exc:
-            _append_log(f"remote render failed: {exc}")
-            _append_log("falling back to local render...")
-        except Exception as exc:
-            _append_log(f"remote connection failed: {exc}")
-            _append_log("falling back to local render...")
-
-    # Always reproject. The camera passed in /api/render is the source of
-    # truth; we deliberately do NOT trust any lazy "projection-already-up-to-
-    # date" tracking, because if that tracking is ever wrong (and it has
-    # been), the render silently uses stale projection. Cost is one extra
-    # `_project_scene` per render -- worth the certainty.
-    cur = _camera_tuple()
-    print(f"[render] reprojecting for camera {cur}  (cam_changed={cam_changed})")
-    print(f"[render] cfg values before reproject: ELEV_DEG={cfg.ELEV_DEG:g}  AZIM_DEG={cfg.AZIM_DEG:g}  FOV_DEG={cfg.FOV_DEG:g}  DISTANCE_K={cfg.DISTANCE_K:g}")
-    reproject_scene(scene_data)
-    layer_cache.clear()
-    _projected_camera = cur
-
-    t0 = time.time()
-    buf = io.StringIO()
+def _do_local_render(job_id: str, payload: dict):
+    """Run a render locally and update the job status."""
     try:
-        with contextlib.redirect_stdout(buf):
-            _, out_path, _ = render_composition(
-                SCENE_REF, composition=composition,
-                write=True, stamp_label=True,
-                scene_data=scene_data, layer_cache=layer_cache,
-            )
+        with _render_lock:
+            reproject_scene(scene_data)
+            layer_cache.clear()
+
+            t0 = time.time()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _, out_path, _ = render_composition(
+                    SCENE_REF,
+                    composition=payload.get("composition"),
+                    write=True,
+                    stamp_label=True,
+                    scene_data=scene_data,
+                    layer_cache=layer_cache,
+                )
+            dt = time.time() - t0
+            _append_log(buf.getvalue())
+            _append_log(f"render done in {dt:.1f}s  ->  {out_path}")
+
+            global last_render_path
+            last_render_path = out_path
+            _local_jobs[job_id] = {
+                "status": "done",
+                "image": f"/img/{Path(out_path).name}?t={int(time.time())}",
+                "time": dt,
+            }
+            _prune_local_jobs()
     except Exception as exc:
         tb = traceback.format_exc()
         _append_log(f"ERROR: {exc}")
         _append_log(tb)
-        return jsonify({"error": str(exc), "trace": tb,
-                        "log": log_lines[-50:]}), 500
-    dt = time.time() - t0
-    _append_log(buf.getvalue())
-    _append_log(f"render done in {dt:.1f}s  ->  {out_path}")
-    last_render_path = out_path
-    return jsonify({
-        "ok": True,
-        "image": f"/img/{Path(out_path).name}?t={int(time.time())}",
-        "time": dt,
-        "log": log_lines[-50:],
-    })
+        _local_jobs[job_id] = {"status": "error", "error": str(exc)}
+        _prune_local_jobs()
+
+
+def _do_remote_render(job_id: str, payload: dict):
+    """Offload a render to REMOTE_RENDER_URL and poll for completion."""
+    try:
+        # 1. Create remote job
+        create_resp = requests.post(
+            f"{REMOTE_RENDER_URL}/api/render",
+            json=payload,
+            timeout=30,
+        )
+        if not create_resp.ok:
+            raise RemoteRenderError(f"remote returned {create_resp.status_code}")
+        remote_job = create_resp.json()
+        remote_job_id = remote_job["job_id"]
+
+        # 2. Poll remote status (max ~10 min)
+        for _ in range(300):
+            time.sleep(2)
+            status_resp = requests.get(
+                f"{REMOTE_RENDER_URL}/api/render/status/{remote_job_id}",
+                timeout=10,
+            )
+            if not status_resp.ok:
+                continue
+            job = status_resp.json().get("job", {})
+
+            if job.get("status") == "done":
+                # 3. Fetch rendered image
+                img_resp = requests.get(
+                    f"{REMOTE_RENDER_URL}/img/{job['image']}",
+                    timeout=60,
+                )
+                if not img_resp.ok:
+                    raise RemoteRenderError("failed to fetch rendered image")
+
+                ts = int(time.time())
+                filename = f"{cfg.SCENE_NAME}_remote_{ts}.png"
+                local_path = Path(__file__).parent / "images" / filename
+                local_path.write_bytes(img_resp.content)
+
+                global last_render_path
+                last_render_path = str(local_path)
+                _append_log(f"remote render -> {last_render_path}")
+
+                _local_jobs[job_id] = {
+                    "status": "done",
+                    "image": f"/img/{filename}?t={ts}",
+                    "time": job.get("time", 0),
+                }
+                _prune_local_jobs()
+                return
+
+            if job.get("status") == "error":
+                raise RemoteRenderError(job.get("error", "unknown remote error"))
+
+        raise RemoteRenderError("remote render timed out after 10 minutes")
+    except Exception as exc:
+        _append_log(f"remote render failed: {exc}")
+        _append_log("falling back to local render...")
+        # Transparent fallback to local
+        _do_local_render(job_id, payload)
+
+
+@app.route("/api/render", methods=["POST"])
+def api_render():
+    """Create an async render job and return its ID immediately.
+
+    The frontend polls /api/render/status/<job_id> until the job is done.
+    Camera and composition overrides are applied synchronously so the
+    global state stays up to date.
+    """
+    global composition
+    payload = request.get_json() or {}
+    if "camera" in payload:
+        _apply_camera_override(payload["camera"])
+    if "composition" in payload:
+        composition = payload["composition"]
+
+    job_id = str(uuid.uuid4())[:8]
+    _local_jobs[job_id] = {"status": "pending"}
+
+    if REMOTE_RENDER_URL:
+        threading.Thread(
+            target=_do_remote_render, args=(job_id, payload), daemon=True
+        ).start()
+    else:
+        threading.Thread(
+            target=_do_local_render, args=(job_id, payload), daemon=True
+        ).start()
+
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+@app.route("/api/render/status/<job_id>", methods=["GET"])
+def api_render_status(job_id):
+    job = _local_jobs.get(job_id, {"status": "unknown"})
+    return jsonify({"ok": True, "job": job, "log": log_lines[-50:]})
+
 
 
 @app.route("/img/<path:filename>")
