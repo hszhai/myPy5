@@ -28,12 +28,13 @@ from collections import OrderedDict
 from copy import deepcopy
 
 os.environ.setdefault("JAVA_HOME", "/usr/local/opt/openjdk@17")
+import numpy as np
 import py5
 
 from render_layers import (
     DEFAULT_COMPOSITION, DEFAULT_WALKS, LAYER_PARAM_SCHEMAS,
     WALK_KEY_MAP, build_scene_data, layer_param_effective, layer_param_set,
-    render_composition,
+    project_anchor, render_composition,
 )
 from scene_io import load_scene, scene_path
 
@@ -44,17 +45,24 @@ SCENE_JSON = cfg.PATH if hasattr(cfg, "PATH") else scene_path(SCENE_REF)
 SCENE_WALKS = getattr(cfg, "SURFACE_WALKS", {}) or {}
 
 # ---- window layout -------------------------------------------------------
-W, H = 1320, 1000
+# 3-column layout: preview | control panel | wireframe (right)
+W, H = 1500, 1000
 PREVIEW_X, PREVIEW_Y = 20, 54
 PREVIEW_W, PREVIEW_H = 540, 720
 PANEL_X = 590
+PANEL_W = 320
 PANEL_RIGHT_PAD = 18
 
-# Compact log strip pinned to the bottom of the right panel — only needs to
-# show enough lines to see render-start / render-end messages.
+# Wireframe 3D-inspection viewport: right column
+WIRE_X = PANEL_X + PANEL_W + 20
+WIRE_Y = PREVIEW_Y
+WIRE_W = 320
+WIRE_H = 320
+
+# Compact log strip pinned to the bottom of the right panel
 LOG_X = PANEL_X
 LOG_Y = H - 110
-LOG_W = W - PANEL_X - PANEL_RIGHT_PAD
+LOG_W = PANEL_W
 LOG_H = 84
 LOG_LINE_H = 14
 LOG_KEEP = 200            # rolling buffer length
@@ -62,7 +70,8 @@ LOG_KEEP = 200            # rolling buffer length
 # UI font — created at UI_FONT_CREATE_SIZE so smaller text_size() calls
 # downscale crisply in P2D's texture-baked PFont. We try a list of names in
 # order and use the first that resolves to an installed face.
-UI_FONT_CANDIDATES = ("Helvetica Neue", "Avenir Next", "Arial", "Lucida Grande")
+# Switched to SF Pro (Apple's native font) for better readability, with fallbacks.
+UI_FONT_CANDIDATES = (".SF NS Text", "SF Pro Text", "Monaco", "Menlo", "Helvetica Neue", "Arial", "Lucida Grande")
 UI_FONT_CREATE_SIZE = 18   # kept modest — larger atlases SIGILL'd on Apple Silicon JOGL
 UI_TEXT_BUMP = 2           # +2pt added to every _tsz(n) call (global readability)
 
@@ -87,30 +96,31 @@ RGB_SUB_FIELD_W = 64
 RGB_SUB_GAP = 12
 RGB_SUB_PITCH = RGB_SUB_LABEL_W + RGB_SUB_FIELD_W + RGB_SUB_GAP
 
-# Two rows of buttons across the panel header.
-_BTN_W = 210
+# Two rows of buttons across the panel header — adjusted for narrower panel width
+_BTN_W = 145
 _BTN_H = 28
 _BTN_GAP = 6
 _BTN_ROW1_Y = 8
 _BTN_ROW2_Y = _BTN_ROW1_Y + _BTN_H + _BTN_GAP
-BTN_RENDER     = dict(x=PANEL_X,                                       y=_BTN_ROW1_Y, w=_BTN_W, h=_BTN_H)
-BTN_SAVE_IMG   = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),                 y=_BTN_ROW1_Y, w=_BTN_W, h=_BTN_H)
-BTN_SAVE_SCENE = dict(x=PANEL_X + 2 * (_BTN_W + _BTN_GAP),             y=_BTN_ROW1_Y, w=_BTN_W, h=_BTN_H)
-BTN_ADD_SPLAT  = dict(x=PANEL_X,                                       y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
-BTN_ADD_WALKS  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),                 y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
-
-# Row 3: debug overlay toggles for understanding how the walks are built.
 _BTN_ROW3_Y = _BTN_ROW2_Y + _BTN_H + _BTN_GAP
-BTN_SHOW_PTS   = dict(x=PANEL_X,                                       y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
-BTN_SHOW_OFFS  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),                 y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
-BTN_SHOW_MASK  = dict(x=PANEL_X + 2 * (_BTN_W + _BTN_GAP),             y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
+_BTN_ROW4_Y = _BTN_ROW3_Y + _BTN_H + _BTN_GAP
+BTN_RENDER     = dict(x=PANEL_X,                         y=_BTN_ROW1_Y, w=_BTN_W, h=_BTN_H)
+BTN_SAVE_IMG   = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW1_Y, w=_BTN_W, h=_BTN_H)
+BTN_SAVE_SCENE = dict(x=PANEL_X,                         y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
+BTN_ADD_SPLAT  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
+BTN_ADD_WALKS  = dict(x=PANEL_X,                         y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
+
+# Row 4: debug overlay toggles for understanding how the walks are built.
+BTN_SHOW_PTS   = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
+BTN_SHOW_OFFS  = dict(x=PANEL_X,                         y=_BTN_ROW4_Y, w=_BTN_W, h=_BTN_H)
+BTN_SHOW_MASK  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW4_Y, w=_BTN_W, h=_BTN_H)
 
 # Layer block layout: the chevron + checkbox + name + alpha live in the header row.
 TRI_W = 12
 TRI_GAP = 8
 CHECK_W = 18
 
-LAYERS_START_Y = _BTN_ROW3_Y + _BTN_H + 16
+LAYERS_START_Y = _BTN_ROW4_Y + _BTN_H + 16
 
 # Templates used when "+ SPLAT" / "+ WALKS" buttons add a new layer.
 ADD_SPLAT_TEMPLATE = {
@@ -148,21 +158,28 @@ ADD_WALKS_TEMPLATE = {
 }
 
 
-_FOCAL_DEFAULTS = dict(
-    focal_enabled=False,
-    focal_cx=0.5, focal_cy=0.5,
-    focal_rx=0.35, focal_ry=0.45,
-    focal_angle_deg=0.0,
-    focal_falloff=0.6,
-    focal_invert=False,
+_MASK3D_DEFAULTS = dict(
+    mask3d_enabled=False,
+    mask3d_x=0.0, mask3d_y=0.0, mask3d_z=0.0,
+    mask3d_r_in=0.3, mask3d_r_out=1.0,
+    mask3d_invert=False,
+)
+
+# Strip leftover focal_* keys from legacy scenes/state so save_scene doesn't
+# bloat the JSON with dead params.
+_FOCAL_LEGACY_KEYS = (
+    "focal_enabled", "focal_cx", "focal_cy", "focal_rx", "focal_ry",
+    "focal_angle_deg", "focal_falloff", "focal_invert",
 )
 
 
 def _hydrate_layer(layer):
     """Expand legacy fields so the tuner can edit them as individual params."""
-    # Common to every layer type: focal mask params live at top level.
-    for k, v in _FOCAL_DEFAULTS.items():
+    # Common to every layer type: 3D mask anchor params live at top level.
+    for k, v in _MASK3D_DEFAULTS.items():
         layer.setdefault(k, v)
+    for k in _FOCAL_LEGACY_KEYS:
+        layer.pop(k, None)
     if layer.get("type") == "base_splat":
         bg = layer.get("bg") or layer.get("background")
         if bg is not None and len(bg) >= 3:
@@ -178,6 +195,8 @@ def _hydrate_layer(layer):
             layer.setdefault("bg_b", 0.0)
         layer.setdefault("saturation", 1.0)
         layer.setdefault("curvature_weight", 0.0)
+        layer.setdefault("depth_focus", 0.5)
+        layer.setdefault("depth_blur", 0.0)
     if layer.get("type") == "surface_walks":
         # ink_r/g/b live inside layer["params"] (params_in="params" in the schema)
         params = layer.setdefault("params", {})
@@ -203,7 +222,7 @@ state = dict(
     log_lines=[],
     show_points=False,      # overlay walker-visited surface points (curve nodes)
     show_offsets=False,     # overlay walker normal-offset (orig -> off) pairs
-    show_mask=False,        # outline each layer's focal mask ellipse on the preview
+    show_mask=False,        # project each layer's 3D anchor + radius onto the preview
     debug_points=[],        # filled by do_render() when show_points is on
     debug_offsets=[],       # filled by do_render() when show_offsets is on
 )
@@ -307,12 +326,13 @@ def _rebuild_fields():
         params_y = y + HEADER_H + 6
         col, row = 0, 0
         for (key, label, type_, fmt, choices) in schema.get("fields", []):
-            if type_ == "rgb":
+            if type_ in ("rgb", "vec3"):
                 if col != 0:
                     row += 1
                     col = 0
                 row_y = params_y + row * (FIELD_H + ROW_GAP)
-                for k, suffix in enumerate(("r", "g", "b")):
+                suffixes = ("r", "g", "b") if type_ == "rgb" else ("x", "y", "z")
+                for k, suffix in enumerate(suffixes):
                     x_label = PANEL_X + RGB_GROUP_LABEL_W + k * RGB_SUB_PITCH
                     x_field = x_label + RGB_SUB_LABEL_W
                     fields.append(dict(
@@ -408,9 +428,18 @@ def draw():
 
     py5.background(14, 17, 23)
 
-    # Title
+    # Title + scene bbox sub-line so the user can read the world-coord range
+    # while typing mask3d_x/y/z and r_in/r_out values.
     py5.fill(220, 225, 235); _tsz(13)
-    py5.text(f"Layers  --  {SCENE_JSON}", 20, 28)
+    py5.text(f"Layers  --  {SCENE_JSON}", 20, 24)
+    py5.fill(150, 160, 175); _tsz(10)
+    bb_min, bb_max = scene_data["bbox"]
+    py5.text(
+        f"scene  x:[{bb_min[0]:+.2f}, {bb_max[0]:+.2f}]"
+        f"  y:[{bb_min[1]:+.2f}, {bb_max[1]:+.2f}]"
+        f"  z:[{bb_min[2]:+.2f}, {bb_max[2]:+.2f}]"
+        f"  span~{float(np.linalg.norm(bb_max - bb_min)):.2f}",
+        20, 42)
 
     # Preview box
     py5.no_fill(); py5.stroke(70, 75, 90); py5.stroke_weight(1)
@@ -422,7 +451,7 @@ def draw():
         if state.get("show_offsets"):
             _draw_offsets_overlay()
         if state.get("show_mask"):
-            _draw_focal_overlay()
+            _draw_mask3d_overlay()
     else:
         py5.fill(130, 135, 150); _tsz(12)
         py5.text("(press RENDER)", PREVIEW_X + 220, PREVIEW_Y + PREVIEW_H / 2)
@@ -432,9 +461,11 @@ def draw():
     _draw_button(BTN_SAVE_SCENE, "SAVE SCENE (s)",  (70, 110, 170), (110, 150, 200))
     _draw_button(BTN_ADD_SPLAT,  "+ SPLAT",         (60, 130, 90),  (90, 165, 120))
     _draw_button(BTN_ADD_WALKS,  "+ WALKS",         (60, 130, 90),  (90, 165, 120))
-    _draw_toggle(BTN_SHOW_PTS,   "show points",     state.get("show_points"))
-    _draw_toggle(BTN_SHOW_OFFS,  "show offsets",    state.get("show_offsets"))
-    _draw_toggle(BTN_SHOW_MASK,  "show mask",       state.get("show_mask"))
+    _draw_toggle(BTN_SHOW_PTS,    "show points",    state.get("show_points"))
+    _draw_toggle(BTN_SHOW_OFFS,   "show offsets",   state.get("show_offsets"))
+    _draw_toggle(BTN_SHOW_MASK,   "show mask",      state.get("show_mask"))
+
+    _draw_wireframe_view()
 
     # Per-layer header strip (chevron + name + type + alpha label)
     name_x = PANEL_X + TRI_W + TRI_GAP + CHECK_W + 10
@@ -456,7 +487,7 @@ def draw():
 
         bottom = y + layer["_ui_h"] - 4
         py5.stroke(48, 54, 66); py5.no_fill(); py5.stroke_weight(1)
-        py5.line(PANEL_X, bottom, W - PANEL_RIGHT_PAD, bottom)
+        py5.line(PANEL_X, bottom, PANEL_X + PANEL_W, bottom)
 
 
 def _draw_chevron(x, y, expanded):
@@ -554,59 +585,250 @@ def _draw_points_overlay():
         py5.point(PREVIEW_X + p[0] * sx, PREVIEW_Y + p[1] * sy)
 
 
-def _draw_focal_overlay():
-    """Outline each layer's focal-mask ellipse on the preview.
+_BBOX_EDGES = (
+    (0, 1), (0, 2), (1, 3), (2, 3),     # bottom face
+    (4, 5), (4, 6), (5, 7), (6, 7),     # top face
+    (0, 4), (1, 5), (2, 6), (3, 7),     # verticals
+)
 
-    Draws an inner ring (d = 1 - falloff, full mask) and outer ring
-    (d = 1 + falloff, zero mask) plus a centre dot and the layer name.
-    Cyan tint for spotlight layers, red for inverted (vignette) layers.
+
+def _bbox_corners(lo, hi):
+    return np.array([
+        [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]],
+        [lo[0], hi[1], lo[2]], [hi[0], hi[1], lo[2]],
+        [lo[0], lo[1], hi[2]], [hi[0], lo[1], hi[2]],
+        [lo[0], hi[1], hi[2]], [hi[0], hi[1], hi[2]],
+    ], dtype=np.float64)
+
+
+def _circle_3d(center, radius, axis_id, n=32):
+    """n+1 points tracing a circle of `radius` around `center` in the plane
+    perpendicular to one of the world axes (axis_id: 0=x, 1=y, 2=z)."""
+    t = np.linspace(0.0, 2.0 * np.pi, n + 1)
+    c, s = np.cos(t) * radius, np.sin(t) * radius
+    pts = np.zeros((n + 1, 3), dtype=np.float64)
+    if axis_id == 0:
+        pts[:, 1] = c; pts[:, 2] = s
+    elif axis_id == 1:
+        pts[:, 0] = c; pts[:, 2] = s
+    else:
+        pts[:, 0] = c; pts[:, 1] = s
+    return pts + np.asarray(center, dtype=np.float64)
+
+
+def _wire_content_rect():
+    """Inner rect inside the wireframe panel that matches the scene's render
+    aspect (cfg.W : cfg.H), centred and with a small margin. Using this for
+    projection scaling avoids squashing the bbox flat when WIRE_W/WIRE_H
+    differs from the scene aspect."""
+    cfg = scene_data["cfg"]
+    aspect = cfg.W / cfg.H
+    margin = 8
+    av_w = WIRE_W - 2 * margin
+    av_h = WIRE_H - 2 * margin
+    if av_w / av_h > aspect:
+        ch = av_h
+        cw = int(round(ch * aspect))
+    else:
+        cw = av_w
+        ch = int(round(cw / aspect))
+    cx = WIRE_X + (WIRE_W - cw) // 2
+    cy = WIRE_Y + (WIRE_H - ch) // 2
+    return cx, cy, cw, ch
+
+
+def _project_world_to_wire(xyz, content_rect=None):
+    """Batch-project an (N, 3) world-space array into wireframe-viewport pixel
+    coords using a content rect that preserves the scene aspect. Points behind
+    the camera get NaN so callers can skip them."""
+    cfg = scene_data["cfg"]
+    cam = scene_data["camera"]
+    if content_rect is None:
+        content_rect = _wire_content_rect()
+    cx, cy, cw, ch = content_rect
+    p = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+    cam_p = (p - cam["center"]) @ cam["Rcam"].T
+    z = cam_p[:, 2] + cam["distance"]
+    z_safe = np.where(z > 1e-6, z, np.nan)
+    x_scene = cfg.W / 2.0 + cam["focal"] * cam_p[:, 0] / z_safe
+    y_scene = cfg.H / 2.0 + cam["ysign"] * cam["focal"] * cam_p[:, 1] / z_safe
+    sx = cw / cfg.W
+    sy = ch / cfg.H
+    return cx + x_scene * sx, cy + y_scene * sy
+
+
+def _poly_lines(xs, ys, weight=1, rgba=(180, 180, 200, 200)):
+    py5.stroke(rgba[0], rgba[1], rgba[2], rgba[3])
+    py5.stroke_weight(weight)
+    py5.no_fill()
+    for i in range(len(xs) - 1):
+        if np.isnan(xs[i]) or np.isnan(xs[i + 1]):
+            continue
+        py5.line(xs[i], ys[i], xs[i + 1], ys[i + 1])
+
+
+def _draw_wireframe_view():
+    """A small, always-live wireframe of the scene's spatial layout:
+    full bbox, density bbox (10-90% per axis), world axes at the centre,
+    and each mask3d_enabled layer's anchor + r_in/r_out spheres (drawn as
+    three orthogonal great-circle rings each). The 3D content lives in an
+    aspect-correct sub-rect so the bbox isn't squashed."""
+    cfg = scene_data["cfg"]
+
+    # Outer panel background
+    py5.no_stroke(); py5.fill(16, 19, 26)
+    py5.rect(WIRE_X, WIRE_Y, WIRE_W, WIRE_H)
+    py5.no_fill(); py5.stroke(60, 68, 84); py5.stroke_weight(1)
+    py5.rect(WIRE_X, WIRE_Y, WIRE_W, WIRE_H)
+
+    # Header strip: title + camera params
+    py5.fill(180, 188, 200); _tsz(10)
+    py5.text("wireframe", WIRE_X + 6, WIRE_Y - 4)
+    cam_info = (f"elev={getattr(cfg, 'ELEV_DEG', 0):.0f}°   "
+                f"azim={getattr(cfg, 'AZIM_DEG', 0):.0f}°   "
+                f"fov={getattr(cfg, 'FOV_DEG', 0):.0f}°   "
+                f"dist×k={getattr(cfg, 'DISTANCE_K', 0):.2f}")
+    py5.fill(150, 160, 175); _tsz(10)
+    tw = py5.text_width(cam_info)
+    py5.text(cam_info, WIRE_X + WIRE_W - tw - 6, WIRE_Y - 4)
+
+    # Inner aspect-correct content rect + frame (subtle so it's clearly the
+    # camera-aspect viewport, not the panel)
+    rect = _wire_content_rect()
+    cx_r, cy_r, cw_r, ch_r = rect
+    py5.no_fill(); py5.stroke(40, 46, 58, 220); py5.stroke_weight(1)
+    py5.rect(cx_r, cy_r, cw_r, ch_r)
+
+    # Full bbox (dim grey)
+    bb_min, bb_max = scene_data["bbox"]
+    corners = _bbox_corners(bb_min, bb_max)
+    xs, ys = _project_world_to_wire(corners, rect)
+    py5.stroke(110, 120, 140, 180); py5.stroke_weight(1)
+    for a, b in _BBOX_EDGES:
+        if np.isnan(xs[a]) or np.isnan(xs[b]):
+            continue
+        py5.line(xs[a], ys[a], xs[b], ys[b])
+
+    # Density bbox (warm orange)
+    if "density_bbox" in scene_data:
+        d_lo, d_hi = scene_data["density_bbox"]
+        d_corners = _bbox_corners(d_lo, d_hi)
+        dxs, dys = _project_world_to_wire(d_corners, rect)
+        py5.stroke(210, 150, 70, 200); py5.stroke_weight(1)
+        for a, b in _BBOX_EDGES:
+            if np.isnan(dxs[a]) or np.isnan(dxs[b]):
+                continue
+            py5.line(dxs[a], dys[a], dxs[b], dys[b])
+
+    # World axes triad at the scene centre, length = 15% of bbox diagonal
+    bb_ctr = (bb_min + bb_max) / 2.0
+    diag = float(np.linalg.norm(bb_max - bb_min))
+    axis_len = diag * 0.15
+    axis_specs = (
+        (np.array([1.0, 0.0, 0.0]), (255,  80,  80)),
+        (np.array([0.0, 1.0, 0.0]), ( 80, 220,  80)),
+        (np.array([0.0, 0.0, 1.0]), ( 80, 130, 255)),
+    )
+    for axis, color in axis_specs:
+        seg = np.stack([bb_ctr, bb_ctr + axis * axis_len])
+        axs, ays = _project_world_to_wire(seg, rect)
+        if np.isnan(axs[0]) or np.isnan(axs[1]):
+            continue
+        py5.stroke(color[0], color[1], color[2], 230); py5.stroke_weight(2)
+        py5.line(axs[0], ays[0], axs[1], ays[1])
+
+    # Mask3D layers: centre dot + three orthogonal rings for r_in and r_out
+    for layer in composition.get("layers", []):
+        if not layer.get("mask3d_enabled"):
+            continue
+        center = np.array([
+            float(layer.get("mask3d_x", 0.0)),
+            float(layer.get("mask3d_y", 0.0)),
+            float(layer.get("mask3d_z", 0.0)),
+        ], dtype=np.float64)
+        r_in = float(layer.get("mask3d_r_in", 0.3))
+        r_out = float(layer.get("mask3d_r_out", 1.0))
+        invert = bool(layer.get("mask3d_invert", False))
+        tint = (255, 110, 110) if invert else (110, 200, 255)
+        dim = (max(tint[0] - 60, 0), max(tint[1] - 60, 0), max(tint[2] - 60, 0))
+
+        # Centre marker
+        mx, my = _project_world_to_wire(center[None], rect)
+        if not np.isnan(mx[0]):
+            py5.no_stroke(); py5.fill(tint[0], tint[1], tint[2], 230)
+            py5.circle(mx[0], my[0], 5)
+            py5.fill(220, 230, 245); _tsz(10)
+            py5.text(layer.get("name") or layer.get("type", ""),
+                     mx[0] + 6, my[0] - 4)
+
+        for r, rgba in (
+            (r_in,  (*tint, 220)),
+            (r_out, (*dim,  150)),
+        ):
+            for axis_id in (0, 1, 2):
+                pts = _circle_3d(center, r, axis_id, n=28)
+                cxs, cys = _project_world_to_wire(pts, rect)
+                _poly_lines(cxs, cys, weight=1, rgba=rgba)
+
+
+def _draw_mask3d_overlay():
+    """Project each mask3d_enabled layer's anchor + radius onto the preview.
+
+    The 3D ball is approximated in screen space: r_pixel = r_world * focal / z.
+    Inner (bright) ring is the fully-masked-in region; outer (dim) ring is the
+    zero-mask boundary. Cyan tint for spotlight (mask3d_invert=false), red for
+    inverted. Centre dot + layer name for identification.
     """
-    cfg_w = scene_data["cfg"].W
-    cfg_h = scene_data["cfg"].H
-    sx = PREVIEW_W / cfg_w
-    sy = PREVIEW_H / cfg_h
-    norm = float(max(cfg_w, cfg_h))
+    cfg = scene_data["cfg"]
+    cam = scene_data["camera"]
+    sx = PREVIEW_W / cfg.W
+    sy = PREVIEW_H / cfg.H
 
     n_pts = 80
     thetas = np.linspace(0.0, 2.0 * np.pi, n_pts)
     cosT = np.cos(thetas); sinT = np.sin(thetas)
 
     for layer in composition.get("layers", []):
-        if not layer.get("focal_enabled"):
+        if not layer.get("mask3d_enabled"):
             continue
-        cx = float(layer.get("focal_cx", 0.5)) * cfg_w
-        cy = float(layer.get("focal_cy", 0.5)) * cfg_h
-        rx = float(layer.get("focal_rx", 0.35)) * norm
-        ry = float(layer.get("focal_ry", 0.45)) * norm
-        angle = np.radians(float(layer.get("focal_angle_deg", 0.0)))
-        falloff = float(layer.get("focal_falloff", 0.6))
-        invert = bool(layer.get("focal_invert", False))
+        anchor_xyz = np.array([
+            float(layer.get("mask3d_x", 0.0)),
+            float(layer.get("mask3d_y", 0.0)),
+            float(layer.get("mask3d_z", 0.0)),
+        ], dtype=np.float64)
+        proj = project_anchor(cam, cfg, anchor_xyz)
+        if proj is None:
+            continue                                      # behind camera
+        x_px, y_px, z_view = proj
+        # Approximate world-to-screen radius scale at the anchor depth.
+        pix_per_world = cam["focal"] / max(z_view, 1e-3)
+        r_in_w  = float(layer.get("mask3d_r_in", 0.3))
+        r_out_w = float(layer.get("mask3d_r_out", 1.0))
+        invert  = bool(layer.get("mask3d_invert", False))
 
-        cosA, sinA = np.cos(angle), np.sin(angle)
         tint_in  = (255, 110, 110) if invert else (110, 200, 255)
         tint_out = (190,  90,  90) if invert else ( 70, 130, 180)
 
         py5.no_fill()
         rings = [
-            (max(1.0 - falloff, 0.05), tint_in,  2, 220),
-            (1.0 + max(falloff, 1e-3), tint_out, 1, 150),
+            (r_in_w  * pix_per_world, tint_in,  2, 220),
+            (r_out_w * pix_per_world, tint_out, 1, 150),
         ]
-        for scale, rgb, weight, alpha_ in rings:
-            ux = cosT * (rx * scale)
-            vy = sinT * (ry * scale)
-            xr = ux * cosA - vy * sinA
-            yr = ux * sinA + vy * cosA
-            xpix = PREVIEW_X + (cx + xr) * sx
-            ypix = PREVIEW_Y + (cy + yr) * sy
+        for r_px, rgb, weight, alpha_ in rings:
+            if r_px < 0.5:
+                continue
+            xpix = PREVIEW_X + (x_px + cosT * r_px) * sx
+            ypix = PREVIEW_Y + (y_px + sinT * r_px) * sy
             py5.stroke(rgb[0], rgb[1], rgb[2], alpha_); py5.stroke_weight(weight)
             for i in range(n_pts - 1):
                 py5.line(xpix[i], ypix[i], xpix[i + 1], ypix[i + 1])
 
+        # Centre marker + label
         py5.no_stroke(); py5.fill(tint_in[0], tint_in[1], tint_in[2], 230)
-        py5.circle(PREVIEW_X + cx * sx, PREVIEW_Y + cy * sy, 6)
+        py5.circle(PREVIEW_X + x_px * sx, PREVIEW_Y + y_px * sy, 6)
         py5.fill(230, 235, 245); _tsz(10)
         py5.text(layer.get("name") or layer.get("type", ""),
-                 PREVIEW_X + cx * sx + 8, PREVIEW_Y + cy * sy - 4)
+                 PREVIEW_X + x_px * sx + 8, PREVIEW_Y + y_px * sy - 4)
 
 
 def _draw_offsets_overlay():
