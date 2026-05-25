@@ -45,25 +45,35 @@ SCENE_JSON = cfg.PATH if hasattr(cfg, "PATH") else scene_path(SCENE_REF)
 SCENE_WALKS = getattr(cfg, "SURFACE_WALKS", {}) or {}
 
 # ---- window layout -------------------------------------------------------
-# 3-column layout: preview | control panel | wireframe (right)
-W, H = 1500, 1000
-PREVIEW_X, PREVIEW_Y = 20, 54
-PREVIEW_W, PREVIEW_H = 540, 720
-PANEL_X = 590
+# Layout: control panel (left) | preview + camera + log (right)
+W, H = 1320, 1000
+PANEL_X = 20
 PANEL_W = 320
 PANEL_RIGHT_PAD = 18
 
-# Wireframe 3D-inspection viewport: right column
-WIRE_X = PANEL_X + PANEL_W + 20
-WIRE_Y = PREVIEW_Y
-WIRE_W = 320
-WIRE_H = 320
+# Preview window (right side, smaller)
+PREVIEW_X = PANEL_X + PANEL_W + 20
+PREVIEW_Y = 54
+PREVIEW_W = 400
+PREVIEW_H = 450
 
-# Compact log strip pinned to the bottom of the right panel
-LOG_X = PANEL_X
-LOG_Y = H - 110
-LOG_W = PANEL_W
-LOG_H = 84
+# Camera control panel (below preview, in right column)
+CAM_PANEL_X = PREVIEW_X
+CAM_PANEL_Y = PREVIEW_Y + PREVIEW_H + 10
+CAM_PANEL_W = PREVIEW_W
+CAM_PANEL_H = 180
+
+# Wireframe 3D-inspection viewport (below camera panel)
+WIRE_X = CAM_PANEL_X
+WIRE_Y = CAM_PANEL_Y + CAM_PANEL_H + 10
+WIRE_W = PREVIEW_W
+WIRE_H = 150
+
+# Log panel (below wireframe, right side)
+LOG_X = PREVIEW_X
+LOG_Y = WIRE_Y + WIRE_H + 10
+LOG_W = PREVIEW_W
+LOG_H = H - LOG_Y - 18
 LOG_LINE_H = 14
 LOG_KEEP = 200            # rolling buffer length
 
@@ -96,31 +106,24 @@ RGB_SUB_FIELD_W = 64
 RGB_SUB_GAP = 12
 RGB_SUB_PITCH = RGB_SUB_LABEL_W + RGB_SUB_FIELD_W + RGB_SUB_GAP
 
-# Two rows of buttons across the panel header — adjusted for narrower panel width
-_BTN_W = 145
+# Two rows of buttons across the panel header — main action buttons
+_BTN_W = 150
 _BTN_H = 28
 _BTN_GAP = 6
 _BTN_ROW1_Y = 8
 _BTN_ROW2_Y = _BTN_ROW1_Y + _BTN_H + _BTN_GAP
-_BTN_ROW3_Y = _BTN_ROW2_Y + _BTN_H + _BTN_GAP
-_BTN_ROW4_Y = _BTN_ROW3_Y + _BTN_H + _BTN_GAP
 BTN_RENDER     = dict(x=PANEL_X,                         y=_BTN_ROW1_Y, w=_BTN_W, h=_BTN_H)
 BTN_SAVE_IMG   = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW1_Y, w=_BTN_W, h=_BTN_H)
 BTN_SAVE_SCENE = dict(x=PANEL_X,                         y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
 BTN_ADD_SPLAT  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
-BTN_ADD_WALKS  = dict(x=PANEL_X,                         y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
-
-# Row 4: debug overlay toggles for understanding how the walks are built.
-BTN_SHOW_PTS   = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
-BTN_SHOW_OFFS  = dict(x=PANEL_X,                         y=_BTN_ROW4_Y, w=_BTN_W, h=_BTN_H)
-BTN_SHOW_MASK  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW4_Y, w=_BTN_W, h=_BTN_H)
+BTN_ADD_WALKS  = dict(x=PANEL_X,                         y=_BTN_ROW2_Y + _BTN_H + _BTN_GAP, w=_BTN_W, h=_BTN_H)
 
 # Layer block layout: the chevron + checkbox + name + alpha live in the header row.
 TRI_W = 12
 TRI_GAP = 8
 CHECK_W = 18
 
-LAYERS_START_Y = _BTN_ROW4_Y + _BTN_H + 16
+LAYERS_START_Y = _BTN_ROW2_Y + _BTN_H + 16
 
 # Templates used when "+ SPLAT" / "+ WALKS" buttons add a new layer.
 ADD_SPLAT_TEMPLATE = {
@@ -220,11 +223,13 @@ state = dict(
     msg="",
     render_pending=False,
     log_lines=[],
-    show_points=False,      # overlay walker-visited surface points (curve nodes)
-    show_offsets=False,     # overlay walker normal-offset (orig -> off) pairs
-    show_mask=False,        # project each layer's 3D anchor + radius onto the preview
-    debug_points=[],        # filled by do_render() when show_points is on
-    debug_offsets=[],       # filled by do_render() when show_offsets is on
+    # Camera parameters (used when rendering)
+    cam_azimuth=0.0,
+    cam_elevation=0.0,
+    cam_fov=40.0,
+    cam_distance_k=1.0,
+    # Fields for camera controls
+    cam_fields=[],
 )
 fields = []                  # all interactive fields, rebuilt by _rebuild_fields
 chevrons = []                # collapse-arrow click rectangles, also rebuilt
@@ -446,12 +451,8 @@ def draw():
     py5.rect(PREVIEW_X, PREVIEW_Y, PREVIEW_W, PREVIEW_H)
     if state["render_image"] is not None:
         py5.image(state["render_image"], PREVIEW_X, PREVIEW_Y, PREVIEW_W, PREVIEW_H)
-        if state.get("show_points"):
-            _draw_points_overlay()
-        if state.get("show_offsets"):
-            _draw_offsets_overlay()
-        if state.get("show_mask"):
-            _draw_mask3d_overlay()
+        # Always show mask anchors and ranges in preview
+        _draw_mask3d_overlay()
     else:
         py5.fill(130, 135, 150); _tsz(12)
         py5.text("(press RENDER)", PREVIEW_X + 220, PREVIEW_Y + PREVIEW_H / 2)
@@ -461,10 +462,8 @@ def draw():
     _draw_button(BTN_SAVE_SCENE, "SAVE SCENE (s)",  (70, 110, 170), (110, 150, 200))
     _draw_button(BTN_ADD_SPLAT,  "+ SPLAT",         (60, 130, 90),  (90, 165, 120))
     _draw_button(BTN_ADD_WALKS,  "+ WALKS",         (60, 130, 90),  (90, 165, 120))
-    _draw_toggle(BTN_SHOW_PTS,    "show points",    state.get("show_points"))
-    _draw_toggle(BTN_SHOW_OFFS,   "show offsets",   state.get("show_offsets"))
-    _draw_toggle(BTN_SHOW_MASK,   "show mask",      state.get("show_mask"))
 
+    _draw_camera_panel()
     _draw_wireframe_view()
 
     # Per-layer header strip (chevron + name + type + alpha label)
@@ -488,6 +487,65 @@ def draw():
         bottom = y + layer["_ui_h"] - 4
         py5.stroke(48, 54, 66); py5.no_fill(); py5.stroke_weight(1)
         py5.line(PANEL_X, bottom, PANEL_X + PANEL_W, bottom)
+
+    _draw_log()
+
+
+def _draw_camera_panel():
+    """Draw camera controls in the right preview column."""
+    # Panel background
+    py5.no_fill(); py5.stroke(70, 75, 90); py5.stroke_weight(1)
+    py5.rect(CAM_PANEL_X, CAM_PANEL_Y, CAM_PANEL_W, CAM_PANEL_H)
+    
+    # Title
+    py5.fill(195, 205, 220); _tsz(11)
+    py5.text("Camera", CAM_PANEL_X + 8, CAM_PANEL_Y + 18)
+    
+    # Camera parameters
+    row_y = CAM_PANEL_Y + 30
+    row_h = 22
+    row_gap = 4
+    label_w = 70
+    field_w = 80
+    
+    # Azimuth
+    py5.fill(170, 180, 195); _tsz(10)
+    py5.text("azimuth", CAM_PANEL_X + 8, row_y + 14)
+    py5.stroke(110, 120, 140); py5.stroke_weight(1)
+    py5.fill(31, 35, 45)
+    py5.rect(CAM_PANEL_X + label_w, row_y, field_w, row_h)
+    py5.fill(200, 210, 225); _tsz(10)
+    py5.text(f"{state['cam_azimuth']:.1f}°", CAM_PANEL_X + label_w + 6, row_y + 15)
+    
+    # Elevation
+    row_y += row_h + row_gap
+    py5.fill(170, 180, 195); _tsz(10)
+    py5.text("elevation", CAM_PANEL_X + 8, row_y + 14)
+    py5.stroke(110, 120, 140); py5.stroke_weight(1)
+    py5.fill(31, 35, 45)
+    py5.rect(CAM_PANEL_X + label_w, row_y, field_w, row_h)
+    py5.fill(200, 210, 225); _tsz(10)
+    py5.text(f"{state['cam_elevation']:.1f}°", CAM_PANEL_X + label_w + 6, row_y + 15)
+    
+    # FOV
+    row_y += row_h + row_gap
+    py5.fill(170, 180, 195); _tsz(10)
+    py5.text("fov", CAM_PANEL_X + 8, row_y + 14)
+    py5.stroke(110, 120, 140); py5.stroke_weight(1)
+    py5.fill(31, 35, 45)
+    py5.rect(CAM_PANEL_X + label_w, row_y, field_w, row_h)
+    py5.fill(200, 210, 225); _tsz(10)
+    py5.text(f"{state['cam_fov']:.1f}°", CAM_PANEL_X + label_w + 6, row_y + 15)
+    
+    # Distance factor
+    row_y += row_h + row_gap
+    py5.fill(170, 180, 195); _tsz(10)
+    py5.text("dist_k", CAM_PANEL_X + 8, row_y + 14)
+    py5.stroke(110, 120, 140); py5.stroke_weight(1)
+    py5.fill(31, 35, 45)
+    py5.rect(CAM_PANEL_X + label_w, row_y, field_w, row_h)
+    py5.fill(200, 210, 225); _tsz(10)
+    py5.text(f"{state['cam_distance_k']:.2f}", CAM_PANEL_X + label_w + 6, row_y + 15)
 
 
 def _draw_chevron(x, y, expanded):
@@ -938,25 +996,6 @@ def mouse_pressed():
         _unfocus_all_commit()
         do_add_layer("walks")
         return
-    if _hit(BTN_SHOW_PTS):
-        _unfocus_all_commit()
-        state["show_points"] = not state.get("show_points", False)
-        if state["show_points"]:
-            # capture happens inside the render -- need a fresh pass
-            state["render_pending"] = True
-            state["msg"] = "rendering with walker-point capture..."
-        return
-    if _hit(BTN_SHOW_OFFS):
-        _unfocus_all_commit()
-        state["show_offsets"] = not state.get("show_offsets", False)
-        if state["show_offsets"]:
-            state["render_pending"] = True
-            state["msg"] = "rendering with offset capture..."
-        return
-    if _hit(BTN_SHOW_MASK):
-        _unfocus_all_commit()
-        state["show_mask"] = not state.get("show_mask", False)
-        return
 
     # Chevron clicks -- toggle collapse for the matching layer.
     for c in chevrons:
@@ -1057,24 +1096,17 @@ def _unfocus_all_commit():
 
 # ---- actions -------------------------------------------------------------
 def do_render():
-    """Run the layered render with stdout captured into the in-window log.
-    Re-uses scene_data and layer_cache so toggles are near-instant. When
-    show_offsets is on, we flip the module-level capture flag in render_layers
-    and clear the cache so the walks layer actually re-executes."""
+    """Run the layered render with stdout captured into the in-window log."""
     _log_append(f"--- render @ {time.strftime('%H:%M:%S')} ---")
     t0 = time.time()
     out_path = None
     buf = io.StringIO()
 
     import render_layers as _rl
-    cap_pts = bool(state.get("show_points"))
-    cap_off = bool(state.get("show_offsets"))
-    _rl.DEBUG_CAPTURE_POINTS  = cap_pts
+    _rl.DEBUG_CAPTURE_POINTS  = False
     _rl.DEBUG_POINTS          = []
-    _rl.DEBUG_CAPTURE_OFFSETS = cap_off
+    _rl.DEBUG_CAPTURE_OFFSETS = False
     _rl.DEBUG_OFFSETS         = []
-    if cap_pts or cap_off:
-        layer_cache.clear()
 
     try:
         with contextlib.redirect_stdout(buf):
@@ -1083,6 +1115,8 @@ def do_render():
                 write=True, stamp_label=True,
                 scene_data=scene_data, layer_cache=layer_cache)
     except Exception as exc:
+        _rl.DEBUG_CAPTURE_POINTS  = False
+        _rl.DEBUG_CAPTURE_OFFSETS = False
         _log_append(f"ERROR: {exc}")
         _log_append(traceback.format_exc())
     captured = buf.getvalue()
@@ -1095,9 +1129,7 @@ def do_render():
             state["_last_out_path"] = out_path
         except Exception as exc:
             _log_append(f"(load_image failed: {exc})")
-    state["debug_points"]  = list(_rl.DEBUG_POINTS)
-    state["debug_offsets"] = list(_rl.DEBUG_OFFSETS)
-    _rl.DEBUG_CAPTURE_POINTS  = False   # reset; only live during this render
+    _rl.DEBUG_CAPTURE_POINTS  = False
     _rl.DEBUG_CAPTURE_OFFSETS = False
     dt = time.time() - t0
     state["msg"] = (f"render done in {dt:.1f}s  ({out_path})"
