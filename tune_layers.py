@@ -103,6 +103,7 @@ BTN_ADD_WALKS  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),                 y=_BTN_RO
 _BTN_ROW3_Y = _BTN_ROW2_Y + _BTN_H + _BTN_GAP
 BTN_SHOW_PTS   = dict(x=PANEL_X,                                       y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
 BTN_SHOW_OFFS  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),                 y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
+BTN_SHOW_MASK  = dict(x=PANEL_X + 2 * (_BTN_W + _BTN_GAP),             y=_BTN_ROW3_Y, w=_BTN_W, h=_BTN_H)
 
 # Layer block layout: the chevron + checkbox + name + alpha live in the header row.
 TRI_W = 12
@@ -120,6 +121,7 @@ ADD_SPLAT_TEMPLATE = {
     "point_pct": 0.25,
     "bg_r": 0.0, "bg_g": 0.0, "bg_b": 0.0,
     "saturation": 1.0,
+    "curvature_weight": 0.0,
     "seed": 17,
 }
 ADD_WALKS_TEMPLATE = {
@@ -146,8 +148,21 @@ ADD_WALKS_TEMPLATE = {
 }
 
 
+_FOCAL_DEFAULTS = dict(
+    focal_enabled=False,
+    focal_cx=0.5, focal_cy=0.5,
+    focal_rx=0.35, focal_ry=0.45,
+    focal_angle_deg=0.0,
+    focal_falloff=0.6,
+    focal_invert=False,
+)
+
+
 def _hydrate_layer(layer):
     """Expand legacy fields so the tuner can edit them as individual params."""
+    # Common to every layer type: focal mask params live at top level.
+    for k, v in _FOCAL_DEFAULTS.items():
+        layer.setdefault(k, v)
     if layer.get("type") == "base_splat":
         bg = layer.get("bg") or layer.get("background")
         if bg is not None and len(bg) >= 3:
@@ -162,6 +177,7 @@ def _hydrate_layer(layer):
             layer.setdefault("bg_g", 0.0)
             layer.setdefault("bg_b", 0.0)
         layer.setdefault("saturation", 1.0)
+        layer.setdefault("curvature_weight", 0.0)
     if layer.get("type") == "surface_walks":
         # ink_r/g/b live inside layer["params"] (params_in="params" in the schema)
         params = layer.setdefault("params", {})
@@ -185,8 +201,10 @@ state = dict(
     msg="",
     render_pending=False,
     log_lines=[],
-    show_points=False,      # overlay projected gaussian centres on preview
+    show_points=False,      # overlay walker-visited surface points (curve nodes)
     show_offsets=False,     # overlay walker normal-offset (orig -> off) pairs
+    show_mask=False,        # outline each layer's focal mask ellipse on the preview
+    debug_points=[],        # filled by do_render() when show_points is on
     debug_offsets=[],       # filled by do_render() when show_offsets is on
 )
 fields = []                  # all interactive fields, rebuilt by _rebuild_fields
@@ -309,6 +327,21 @@ def _rebuild_fields():
                 col = 0
                 continue
 
+            if type_ == "bool":
+                # Slot a checkbox into the 2-col grid; label is drawn to the
+                # left of the box by _draw_checkbox (param-kind branch).
+                cx = PANEL_X + col * COL_PITCH + LABEL_W
+                cy = params_y + row * (FIELD_H + ROW_GAP)
+                fields.append(dict(
+                    kind="param", layer=i, key=key, label=label,
+                    x=cx, y=cy + 2, w=CHECK_W, h=CHECK_W,
+                    type="bool", fmt="", choices=None))
+                col += 1
+                if col >= PARAMS_PER_ROW:
+                    col = 0
+                    row += 1
+                continue
+
             cx = PANEL_X + col * COL_PITCH + LABEL_W
             cy = params_y + row * (FIELD_H + ROW_GAP)
             fields.append(dict(
@@ -388,6 +421,8 @@ def draw():
             _draw_points_overlay()
         if state.get("show_offsets"):
             _draw_offsets_overlay()
+        if state.get("show_mask"):
+            _draw_focal_overlay()
     else:
         py5.fill(130, 135, 150); _tsz(12)
         py5.text("(press RENDER)", PREVIEW_X + 220, PREVIEW_Y + PREVIEW_H / 2)
@@ -399,6 +434,7 @@ def draw():
     _draw_button(BTN_ADD_WALKS,  "+ WALKS",         (60, 130, 90),  (90, 165, 120))
     _draw_toggle(BTN_SHOW_PTS,   "show points",     state.get("show_points"))
     _draw_toggle(BTN_SHOW_OFFS,  "show offsets",    state.get("show_offsets"))
+    _draw_toggle(BTN_SHOW_MASK,  "show mask",       state.get("show_mask"))
 
     # Per-layer header strip (chevron + name + type + alpha label)
     name_x = PANEL_X + TRI_W + TRI_GAP + CHECK_W + 10
@@ -499,20 +535,78 @@ def _draw_toggle(btn, label, active):
 
 
 def _draw_points_overlay():
-    """Overlay the projected gaussian centres on the preview image."""
+    """Overlay the surface points the walker actually stepped on (curve nodes).
+    Populated by do_render() via render_layers.DEBUG_POINTS -- shows ONLY the
+    points the walks selected, not the full projected point cloud."""
+    pts = state.get("debug_points") or []
+    if not pts:
+        return
     cfg_w = scene_data["cfg"].W
     cfg_h = scene_data["cfg"].H
     sx = PREVIEW_W / cfg_w
     sy = PREVIEW_H / cfg_h
-    keep = scene_data["keep"]
-    pts = scene_data["mean2d"][keep]
-    n_max = 4000
+    n_max = 8000
     if len(pts) > n_max:
         step = max(1, len(pts) // n_max)
         pts = pts[::step]
-    py5.stroke(255, 220, 80, 200); py5.stroke_weight(2); py5.no_fill()
+    py5.stroke(255, 220, 80, 220); py5.stroke_weight(3); py5.no_fill()
     for p in pts:
         py5.point(PREVIEW_X + p[0] * sx, PREVIEW_Y + p[1] * sy)
+
+
+def _draw_focal_overlay():
+    """Outline each layer's focal-mask ellipse on the preview.
+
+    Draws an inner ring (d = 1 - falloff, full mask) and outer ring
+    (d = 1 + falloff, zero mask) plus a centre dot and the layer name.
+    Cyan tint for spotlight layers, red for inverted (vignette) layers.
+    """
+    cfg_w = scene_data["cfg"].W
+    cfg_h = scene_data["cfg"].H
+    sx = PREVIEW_W / cfg_w
+    sy = PREVIEW_H / cfg_h
+    norm = float(max(cfg_w, cfg_h))
+
+    n_pts = 80
+    thetas = np.linspace(0.0, 2.0 * np.pi, n_pts)
+    cosT = np.cos(thetas); sinT = np.sin(thetas)
+
+    for layer in composition.get("layers", []):
+        if not layer.get("focal_enabled"):
+            continue
+        cx = float(layer.get("focal_cx", 0.5)) * cfg_w
+        cy = float(layer.get("focal_cy", 0.5)) * cfg_h
+        rx = float(layer.get("focal_rx", 0.35)) * norm
+        ry = float(layer.get("focal_ry", 0.45)) * norm
+        angle = np.radians(float(layer.get("focal_angle_deg", 0.0)))
+        falloff = float(layer.get("focal_falloff", 0.6))
+        invert = bool(layer.get("focal_invert", False))
+
+        cosA, sinA = np.cos(angle), np.sin(angle)
+        tint_in  = (255, 110, 110) if invert else (110, 200, 255)
+        tint_out = (190,  90,  90) if invert else ( 70, 130, 180)
+
+        py5.no_fill()
+        rings = [
+            (max(1.0 - falloff, 0.05), tint_in,  2, 220),
+            (1.0 + max(falloff, 1e-3), tint_out, 1, 150),
+        ]
+        for scale, rgb, weight, alpha_ in rings:
+            ux = cosT * (rx * scale)
+            vy = sinT * (ry * scale)
+            xr = ux * cosA - vy * sinA
+            yr = ux * sinA + vy * cosA
+            xpix = PREVIEW_X + (cx + xr) * sx
+            ypix = PREVIEW_Y + (cy + yr) * sy
+            py5.stroke(rgb[0], rgb[1], rgb[2], alpha_); py5.stroke_weight(weight)
+            for i in range(n_pts - 1):
+                py5.line(xpix[i], ypix[i], xpix[i + 1], ypix[i + 1])
+
+        py5.no_stroke(); py5.fill(tint_in[0], tint_in[1], tint_in[2], 230)
+        py5.circle(PREVIEW_X + cx * sx, PREVIEW_Y + cy * sy, 6)
+        py5.fill(230, 235, 245); _tsz(10)
+        py5.text(layer.get("name") or layer.get("type", ""),
+                 PREVIEW_X + cx * sx + 8, PREVIEW_Y + cy * sy - 4)
 
 
 def _draw_offsets_overlay():
@@ -539,6 +633,11 @@ def _draw_offsets_overlay():
 
 
 def _draw_checkbox(field):
+    # Schema-driven bool params get a label to the left of the box; the
+    # layer-header "enabled" checkbox has no label (kind != "param").
+    if field.get("kind") == "param" and field.get("label"):
+        py5.fill(170, 180, 195); _tsz(11)
+        py5.text(field["label"], field["x"] - LABEL_W + 2, field["y"] + 14)
     checked = bool(_read(field))
     py5.stroke(110, 120, 140); py5.stroke_weight(1)
     py5.fill(25, 29, 38)
@@ -620,14 +719,21 @@ def mouse_pressed():
     if _hit(BTN_SHOW_PTS):
         _unfocus_all_commit()
         state["show_points"] = not state.get("show_points", False)
+        if state["show_points"]:
+            # capture happens inside the render -- need a fresh pass
+            state["render_pending"] = True
+            state["msg"] = "rendering with walker-point capture..."
         return
     if _hit(BTN_SHOW_OFFS):
         _unfocus_all_commit()
         state["show_offsets"] = not state.get("show_offsets", False)
         if state["show_offsets"]:
-            # toggling on requires a fresh render so we can capture pairs
             state["render_pending"] = True
             state["msg"] = "rendering with offset capture..."
+        return
+    if _hit(BTN_SHOW_MASK):
+        _unfocus_all_commit()
+        state["show_mask"] = not state.get("show_mask", False)
         return
 
     # Chevron clicks -- toggle collapse for the matching layer.
@@ -739,10 +845,13 @@ def do_render():
     buf = io.StringIO()
 
     import render_layers as _rl
-    capture = bool(state.get("show_offsets"))
-    _rl.DEBUG_CAPTURE_OFFSETS = capture
-    _rl.DEBUG_OFFSETS = []
-    if capture:
+    cap_pts = bool(state.get("show_points"))
+    cap_off = bool(state.get("show_offsets"))
+    _rl.DEBUG_CAPTURE_POINTS  = cap_pts
+    _rl.DEBUG_POINTS          = []
+    _rl.DEBUG_CAPTURE_OFFSETS = cap_off
+    _rl.DEBUG_OFFSETS         = []
+    if cap_pts or cap_off:
         layer_cache.clear()
 
     try:
@@ -764,8 +873,10 @@ def do_render():
             state["_last_out_path"] = out_path
         except Exception as exc:
             _log_append(f"(load_image failed: {exc})")
+    state["debug_points"]  = list(_rl.DEBUG_POINTS)
     state["debug_offsets"] = list(_rl.DEBUG_OFFSETS)
-    _rl.DEBUG_CAPTURE_OFFSETS = False   # reset; only live during this render
+    _rl.DEBUG_CAPTURE_POINTS  = False   # reset; only live during this render
+    _rl.DEBUG_CAPTURE_OFFSETS = False
     dt = time.time() - t0
     state["msg"] = (f"render done in {dt:.1f}s  ({out_path})"
                     if out_path else f"render FAILED ({dt:.1f}s)")

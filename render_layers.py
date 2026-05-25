@@ -39,11 +39,19 @@ from npr_utils import (
 
 
 # ----------------------------------------------------------------------
-# Debug-capture hook for the tuner. When DEBUG_CAPTURE_OFFSETS is True,
-# layer_surface_walks appends (p1_orig, p1_offset) pairs (in screen pixels)
-# into DEBUG_OFFSETS so the tuner can overlay them on the preview. Defaults
-# off; the tuner toggles and reads these directly.
+# Debug-capture hooks for the tuner. When their flags are True, the walks
+# layer records into the matching lists so the tuner can overlay on the
+# preview. Defaults off; the tuner toggles and reads these directly.
+#
+#   DEBUG_POINTS    : surface points the walker actually stepped on -- the
+#                     curve nodes. This is the "show points" overlay and is
+#                     the right answer to "which points become the curves".
+#   DEBUG_OFFSETS   : (p1_orig, p1_offset) pairs for normal-offset segments.
 # ----------------------------------------------------------------------
+DEBUG_CAPTURE_POINTS = False
+DEBUG_POINTS = []
+_DEBUG_POINTS_CAP = 50000
+
 DEBUG_CAPTURE_OFFSETS = False
 DEBUG_OFFSETS = []
 _DEBUG_OFFSETS_CAP = 20000
@@ -136,7 +144,24 @@ WALK_KEY_MAP = {
 #   "params"    -> inside layer["params"] (e.g. surface_walks: layer["params"]["n_walkers"])
 # `enabled` and `alpha` are handled by the tuner separately (every layer has them)
 # and are NOT listed below.
+#
+# FOCAL_FIELDS are appended to every type. The focal mask is a per-layer
+# screen-space alpha modulator (rotated ellipse + smoothstep falloff) applied
+# at COMPOSITE time, so changing focal params doesn't bust the layer cache.
+# All focal_* keys live at the layer's top level regardless of params_in.
 # ----------------------------------------------------------------------
+FOCAL_FIELDS = [
+    ("focal_enabled",   "focal on",    "bool",  "",       None),
+    ("focal_cx",        "focal cx",    "float", "{:.2f}", None),
+    ("focal_cy",        "focal cy",    "float", "{:.2f}", None),
+    ("focal_rx",        "focal rx",    "float", "{:.2f}", None),
+    ("focal_ry",        "focal ry",    "float", "{:.2f}", None),
+    ("focal_angle_deg", "focal angle", "float", "{:.0f}", None),
+    ("focal_falloff",   "focal soft",  "float", "{:.2f}", None),
+    ("focal_invert",    "focal invert","bool",  "",       None),
+]
+_FOCAL_KEYS = {f[0] for f in FOCAL_FIELDS}
+
 LAYER_PARAM_SCHEMAS = {
     "base_splat": {
         "params_in": None,
@@ -146,7 +171,10 @@ LAYER_PARAM_SCHEMAS = {
             # "rgb" expands to <key>_r/<key>_g/<key>_b in a single grouped row
             ("bg",         "color",      "rgb",   "{:.2f}", None),
             ("saturation", "saturation", "float", "{:.2f}", None),
-        ],
+            # 0 = uniform/depth random sampling (current behaviour);
+            # 1 = sample fully weighted by per-gaussian curvature.
+            ("curvature_weight", "curvature", "float", "{:.2f}", None),
+        ] + FOCAL_FIELDS,
     },
     "surface_walks": {
         "params_in": "params",
@@ -161,7 +189,7 @@ LAYER_PARAM_SCHEMAS = {
             ("stroke_alpha",      "stroke alpha",  "float", "{:.2f}", None),
             ("ink_darken",        "ref blend",     "float", "{:.2f}", None),
             ("ink",               "ink color",     "rgb",   "{:.2f}", None),
-            ("placement",         "placement",     "str",   "{:s}",   ["saliency", "uniform"]),
+            ("placement",         "placement",     "str",   "{:s}",   ["saliency", "uniform", "curvature"]),
             ("stroke_mode",       "stroke mode",   "str",   "{:s}",   ["line", "splat"]),
             ("stroke_width",      "line width",    "float", "{:.1f}", None),
             ("splat_scale",       "splat scale",   "float", "{:.2f}", None),
@@ -175,7 +203,7 @@ LAYER_PARAM_SCHEMAS = {
                  "ramp", "ease_in", "ease_out", "ease_in_out", "cycle", "pulse"]),
             ("offset_envelope_scale", "env scale", "float", "{:.0f}", None),
             ("seed",              "seed",          "int",   "{:.0f}", None),
-        ],
+        ] + FOCAL_FIELDS,
     },
 }
 
@@ -202,7 +230,8 @@ def layer_param_set(layer, key, value):
     """Write a value to the layer's natural location for this key."""
     schema = LAYER_PARAM_SCHEMAS.get(layer.get("type"), {})
     section = schema.get("params_in")
-    if section:
+    # focal_* always lives at the layer's top level regardless of params_in
+    if section and key not in _FOCAL_KEYS:
         layer.setdefault(section, {})[key] = value
     else:
         layer[key] = value
@@ -244,7 +273,44 @@ def _over(canvas, color, alpha, layer_alpha=1.0):
     return canvas * (1.0 - a) + color * a
 
 
-def _sample_order(order, pct, seed):
+def _focal_mask(W, H, spec):
+    """Per-layer focal-region alpha modulator.
+
+    Returns an (H, W) float64 array in [0, 1], or None when focal_enabled is
+    false. Geometry: rotated ellipse centred at (focal_cx*W, focal_cy*H) with
+    radii (focal_rx, focal_ry) * max(W, H). Inside the inner ellipse
+    (d = 1 - falloff) the mask is 1; outside the outer ellipse (d = 1 + falloff)
+    the mask is 0; between them, a smoothstep transition. focal_invert flips
+    the mask (useful for vignette: 0 in centre, 1 at edges)."""
+    if not spec.get("focal_enabled", False):
+        return None
+    cx = float(spec.get("focal_cx", 0.5)) * W
+    cy = float(spec.get("focal_cy", 0.5)) * H
+    norm = float(max(W, H))
+    rx = max(float(spec.get("focal_rx", 0.35)) * norm, 1.0)
+    ry = max(float(spec.get("focal_ry", 0.45)) * norm, 1.0)
+    angle = np.radians(float(spec.get("focal_angle_deg", 0.0)))
+    falloff = float(spec.get("focal_falloff", 0.6))
+    invert = bool(spec.get("focal_invert", False))
+
+    ys, xs = np.mgrid[0:H, 0:W]
+    dx = xs - cx
+    dy = ys - cy
+    cosA, sinA = np.cos(angle), np.sin(angle)
+    u = (dx * cosA + dy * sinA) / rx
+    v = (-dx * sinA + dy * cosA) / ry
+    d = np.sqrt(u * u + v * v)
+
+    inner = max(1.0 - falloff, 0.0)
+    outer = 1.0 + max(falloff, 1e-3)
+    t = np.clip((d - inner) / (outer - inner), 0.0, 1.0)
+    mask = 1.0 - t * t * (3.0 - 2.0 * t)            # smoothstep, 1 inside -> 0 outside
+    if invert:
+        mask = 1.0 - mask
+    return mask.astype(np.float64)
+
+
+def _sample_order(order, pct, seed, weights=None):
     pct = float(pct)
     if pct >= 1.0:
         return order
@@ -252,8 +318,13 @@ def _sample_order(order, pct, seed):
         return order[:0]
     rng = np.random.default_rng(int(seed))
     n = max(1, int(round(len(order) * pct)))
-    pick = rng.choice(len(order), size=n, replace=False)
-    pick.sort()
+    if weights is not None:
+        w = np.asarray(weights, dtype=np.float64) + 1e-6
+        w = w / w.sum()
+        pick = rng.choice(len(order), size=n, replace=False, p=w)
+    else:
+        pick = rng.choice(len(order), size=n, replace=False)
+    pick.sort()           # keep depth ordering inside the picked subset
     return order[pick]
 
 
@@ -290,10 +361,23 @@ def layer_base_splat(cfg, G, mean2d, cov2d, depths, keep, spec):
     point_pct = float(spec.get("point_pct", spec.get("pct", 1.0)))
     bg = _resolve_bg(spec)
     saturation = float(spec.get("saturation", 1.0))
+    curvature_weight = float(spec.get("curvature_weight", 0.0))
+
     order = keep[np.argsort(-depths[keep])]
-    order = _sample_order(order, point_pct, seed)
+
+    weights = None
+    curvature_full = G.get("curvature")
+    if curvature_weight > 0.0 and curvature_full is not None:
+        c = curvature_full[order]
+        c_norm = c / (c.max() + 1e-9)
+        # Blend: uniform (1) + curvature emphasis. weight=1 -> nearly pure
+        # curvature; weight=0 -> uniform (unused, falls through).
+        weights = (1.0 - curvature_weight) + curvature_weight * c_norm
+
+    order = _sample_order(order, point_pct, seed, weights=weights)
+    cw_tag = f"  cw={curvature_weight:.2f}" if weights is not None else ""
     print(f"  base_splat: {len(order)} / {len(keep)} visible points "
-          f"({point_pct:.2%})  bg={[f'{c:.2f}' for c in bg]}  sat={saturation:.2f}")
+          f"({point_pct:.2%})  bg={[f'{c:.2f}' for c in bg]}  sat={saturation:.2f}{cw_tag}")
     img = splat(cfg.W, cfg.H, mean2d, cov2d, G["colors"], G["opacities"],
                 order, bg=bg, verbose=False)
     img = _apply_saturation(img, saturation)
@@ -301,11 +385,14 @@ def layer_base_splat(cfg, G, mean2d, cov2d, depths, keep, spec):
     return img, alpha
 
 
-def _placement_weights(pts, ops, saliency, placement):
+def _placement_weights(pts, ops, saliency, placement, curvature=None):
     if placement == "saliency":
         ix = np.clip(pts[:, 0].astype(int), 0, saliency.shape[1] - 1)
         iy = np.clip(pts[:, 1].astype(int), 0, saliency.shape[0] - 1)
         return ops * (saliency[iy, ix] + 0.04)
+    if placement == "curvature" and curvature is not None:
+        # Small epsilon so flat regions still have some chance of being seeded.
+        return ops * (curvature + 0.04)
     return ops
 
 
@@ -347,8 +434,11 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
     ops = G["opacities"][keep]
     cov2d_kept = cov2d[keep]
     normals = G["normals"][keep]
+    curvature_full = G.get("curvature")
+    curvature_kept = curvature_full[keep] if curvature_full is not None else None
     tree3d = cKDTree(xyz)
-    weights = _placement_weights(pts, ops, saliency, params["PLACEMENT"])
+    weights = _placement_weights(pts, ops, saliency, params["PLACEMENT"],
+                                  curvature=curvature_kept)
     weights = weights / weights.sum()
 
     direction_field = None
@@ -385,6 +475,11 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
     for _ in range(int(params["N_WALKERS"])):
         cur = int(rng.choice(len(pts), p=weights))
         prev_dir = None
+        # Track the *drawn* position of the previous step so each segment
+        # picks up where the last one left off. Without this, consecutive
+        # segments alternate surface->offset->surface->offset and the curve
+        # zig-zags instead of staying on the offset path.
+        prev_p = np.asarray(pts[cur], dtype=np.float64).copy()
         for step_idx in range(int(params["STEPS"])):
             result = walk_step_3d(
                 cur, prev_dir, tree3d, xyz, pts,
@@ -393,20 +488,27 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
             if result is None:
                 break
             nxt, prev_dir = result
-            p0, p1 = pts[cur], pts[nxt]
-            
+            p1_raw = pts[nxt]
+            p1 = np.asarray(p1_raw, dtype=np.float64).copy()
+
+            if DEBUG_CAPTURE_POINTS and len(DEBUG_POINTS) < _DEBUG_POINTS_CAP:
+                DEBUG_POINTS.append(np.asarray(p1_raw, dtype=np.float64).copy())
+
             if normal_offset_scale != 0.0:
                 normal_3d = normals[nxt]
                 env_val = envelope_value(
                     step_idx, int(params["STEPS"]), offset_envelope_mode,
                     spatial_field=envelope_field,
                     px=p1[0], py=p1[1], W=cfg.W, H=cfg.H)
-                p1_orig = np.asarray(p1, dtype=np.float64).copy()
                 p1 = _apply_normal_offset(p1, normal_3d, normal_offset_scale,
                                          envelope_value=env_val, cfg=cfg)
                 if DEBUG_CAPTURE_OFFSETS and len(DEBUG_OFFSETS) < _DEBUG_OFFSETS_CAP:
-                    DEBUG_OFFSETS.append((p1_orig,
-                                          np.asarray(p1, dtype=np.float64).copy()))
+                    DEBUG_OFFSETS.append((np.asarray(p1_raw, dtype=np.float64).copy(),
+                                          p1.copy()))
+
+            # Draw from the *drawn* endpoint of the previous step (already
+            # offset, when applicable) to this step's drawn endpoint.
+            p0 = prev_p
             
             color = _seg_color(p0, p1, ref_img, ink_color, ink_blend,
                                cfg.W, cfg.H)
@@ -423,6 +525,7 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
                 add_line(line_canvas, p0[0], p0[1], p1[0], p1[1], color,
                          float(params["STROKE_ALPHA"]), cfg.W, cfg.H,
                          width=float(params["STROKE_WIDTH"]))
+            prev_p = p1   # carry this step's drawn endpoint into the next
             cur = nxt
             drawn += 1
 
@@ -433,8 +536,9 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
     return line_canvas, alpha
 
 
-_HASH_EXCLUDE = {"enabled", "alpha", "name",
-                 "_ui_y", "_ui_h", "_ui_collapsed", "_ui_section"}
+_HASH_EXCLUDE = ({"enabled", "alpha", "name",
+                  "_ui_y", "_ui_h", "_ui_collapsed", "_ui_section"}
+                 | _FOCAL_KEYS)   # focal is applied at composite time, not baked in
 
 
 def _canonicalize(obj):
@@ -488,6 +592,75 @@ def _save_png_with_metadata(filepath, canvas, metadata):
         pil_img.save(filepath, "PNG", pnginfo=info)
 
 
+def _compute_curvature(cfg, G):
+    """Compute a per-gaussian curvature scalar in [0, 1] from normal disagreement.
+
+    For each gaussian, take the mean normal of its k nearest neighbours,
+    re-normalise, and use `1 - dot(self_normal, mean_neighbour_normal)`.
+    Aligned neighbours -> 0 (flat); disagreeing -> high (edges/creases).
+
+    Controlled by `curvature_k` (scene JSON) or `CURVATURE_K` (env var).
+    Default 8. Set to <=1 to skip entirely (G['curvature'] is then absent).
+    """
+    k = int(os.environ.get("CURVATURE_K", cfg._raw.get("curvature_k", 8)))
+    if k <= 1:
+        return
+    t0 = time.time()
+    tree = cKDTree(G["xyz"])
+    _, knn_idx = tree.query(G["xyz"], k=k)
+    mean_n = G["normals"][knn_idx].mean(axis=1)
+    mag = np.linalg.norm(mean_n, axis=1, keepdims=True) + 1e-9
+    mean_n_unit = mean_n / mag
+    dots = np.einsum("ij,ij->i", G["normals"], mean_n_unit)
+    G["curvature"] = np.clip(1.0 - dots, 0.0, 1.0).astype(np.float32)
+    c = G["curvature"]
+    print(f"[layers] curvature over k={k} in {time.time() - t0:.1f}s  "
+          f"(min={c.min():.3f} mean={c.mean():.3f} max={c.max():.3f})")
+
+
+def _simplify_base(cfg, G):
+    """Optional one-time base simplification.
+
+    Scene-JSON keys (also overridable via env vars):
+      base_density    (float, 0<x<=1)  -- random subsample to this fraction
+      base_seed       (int)            -- rng seed for the subsample
+      normal_smooth_k (int, >=2)       -- k-NN average gaussian normals
+                                         (applied AFTER downsample)
+
+    Both default to "off" so existing scenes are unaffected. Returns G in place.
+    """
+    raw_n = len(G["xyz"])
+
+    base_density = float(os.environ.get(
+        "BASE_DENSITY", cfg._raw.get("base_density", 1.0)))
+    normal_smooth_k = int(os.environ.get(
+        "NORMAL_SMOOTH_K", cfg._raw.get("normal_smooth_k", 0)))
+
+    if 0.0 < base_density < 1.0:
+        keep_n = max(1, int(raw_n * base_density))
+        seed = int(os.environ.get("BASE_SEED", cfg._raw.get("base_seed", 17)))
+        idx = np.random.default_rng(seed).choice(raw_n, size=keep_n, replace=False)
+        idx.sort()
+        for k in list(G.keys()):
+            arr = G[k]
+            if isinstance(arr, np.ndarray) and len(arr) == raw_n:
+                G[k] = arr[idx]
+        print(f"[layers] base downsample: {raw_n} -> {len(G['xyz'])} "
+              f"({base_density:.0%}, seed={seed})")
+
+    if normal_smooth_k > 1:
+        t0 = time.time()
+        tree = cKDTree(G["xyz"])
+        _, knn_idx = tree.query(G["xyz"], k=int(normal_smooth_k))
+        smoothed = G["normals"][knn_idx].mean(axis=1)
+        mag = np.linalg.norm(smoothed, axis=1, keepdims=True) + 1e-9
+        G["normals"] = (smoothed / mag).astype(G["normals"].dtype, copy=False)
+        print(f"[layers] smoothed normals over k={normal_smooth_k} "
+              f"neighbours in {time.time() - t0:.1f}s")
+
+    return raw_n
+
+
 def build_scene_data(scene_ref):
     """Pre-compute everything that does not depend on the layer set:
     PLY load, decode, projection, reference image, saliency, normals.
@@ -497,7 +670,12 @@ def build_scene_data(scene_ref):
     data = load_3dgs_ply(cfg.PLY)
     G = decode_3dgs(data)
     G["normals"] = compute_gaussian_normals(G["cov3"])
-    print(f"[layers] scene={cfg.SCENE_NAME} ply={cfg.PLY} gaussians={len(data)}")
+    raw_n = _simplify_base(cfg, G)
+    _compute_curvature(cfg, G)
+    eff_n = len(G["xyz"])
+    suffix = f" (from {raw_n})" if eff_n != raw_n else ""
+    print(f"[layers] scene={cfg.SCENE_NAME} ply={cfg.PLY} "
+          f"gaussians={eff_n}{suffix}")
     t0 = time.time()
     mean2d, cov2d, depths, keep = _project_scene(cfg, G)
     print(f"[layers] projected {len(keep)} visible in {time.time() - t0:.1f}s")
@@ -577,8 +755,12 @@ def render_composition(scene_ref, composition=None, write=True, stamp_label=True
                     else:
                         layer_cache.pop(next(iter(layer_cache)))
 
-        canvas = _over(canvas, color, alpha, layer_alpha=float(spec.get("alpha", 1.0)))
-        print(f"  layer {layer_name}: on ({time.time() - t_layer:.1f}s)")
+        focal = _focal_mask(cfg.W, cfg.H, spec)
+        composite_alpha = alpha if focal is None else alpha * focal
+        canvas = _over(canvas, color, composite_alpha,
+                       layer_alpha=float(spec.get("alpha", 1.0)))
+        focal_tag = "  [focal]" if focal is not None else ""
+        print(f"  layer {layer_name}: on ({time.time() - t_layer:.1f}s){focal_tag}")
 
     if stamp_label:
         canvas = stamp(canvas, f"{cfg.SCENE_NAME} layers", cfg.W, cfg.H)
