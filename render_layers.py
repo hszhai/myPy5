@@ -532,7 +532,7 @@ def _apply_normal_offset(p1_screen, normal_3d, scale, envelope_value=1.0, cfg=No
     return p1_screen + normal_2d
 
 
-def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
+def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec, bg=PAPER_COLOR):
     params = _walk_params(cfg.SURFACE_WALKS, spec.get("params", {}), spec)
     rng = np.random.default_rng(int(params["SEED"]))
     pts = mean2d[keep]
@@ -581,7 +581,8 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
         float(params.get("INK_B", 0.0)),
     ], dtype=np.float64)
     ink_blend = float(params["INK_DARKEN"])
-    line_canvas = np.tile(PAPER_COLOR, (cfg.H, cfg.W, 1)).astype(np.float64)
+    bg = np.asarray(bg, dtype=np.float64)
+    line_canvas = np.tile(bg, (cfg.H, cfg.W, 1)).astype(np.float64)
     drawn = 0
     for _ in range(int(params["N_WALKERS"])):
         cur = int(rng.choice(len(pts), p=weights))
@@ -640,9 +641,10 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
             cur = nxt
             drawn += 1
 
-    paper_luma = PAPER_COLOR @ np.array([0.299, 0.587, 0.114])
-    luma = line_canvas @ np.array([0.299, 0.587, 0.114])
-    alpha = np.clip((paper_luma - luma) / max(paper_luma, 1e-6), 0.0, 1.0)
+    # Alpha extraction: how much did we deviate from the shared background?
+    # Use a soft threshold on Euclidean distance in RGB space.
+    diff = np.linalg.norm(line_canvas - bg, axis=-1)
+    alpha = np.clip((diff - 0.01) / 0.08, 0.0, 1.0)
     print(f"  surface_walks: {drawn} segments")
     return line_canvas, alpha
 
@@ -753,7 +755,7 @@ def _project_curve_points(pts_3d, camera, W, H):
     return mean2d, Z, valid
 
 
-def layer_generative_curve(cfg, camera, ref_img, depths_range, spec):
+def layer_generative_curve(cfg, camera, ref_img, depths_range, spec, bg=PAPER_COLOR):
     """Render a procedurally-generated 3D curve with splats or lines.
 
     Generates N points in a 3D shape (sphere, ring, random walk, lorenz),
@@ -826,7 +828,8 @@ def layer_generative_curve(cfg, camera, ref_img, depths_range, spec):
     drange = max(d_hi - d_lo, 1e-6)
     focus_d = d_lo + np.clip(depth_focus, 0.0, 1.0) * drange
 
-    canvas = np.tile(PAPER_COLOR, (cfg.H, cfg.W, 1)).astype(np.float64)
+    bg = np.asarray(bg, dtype=np.float64)
+    canvas = np.tile(bg, (cfg.H, cfg.W, 1)).astype(np.float64)
     drawn = 0
 
     for i in range(len(order) - 1):
@@ -882,10 +885,11 @@ def layer_generative_curve(cfg, camera, ref_img, depths_range, spec):
                      seg_color, seg_alpha, cfg.W, cfg.H, width=stroke_width)
         drawn += 1
 
-    # Alpha = how much we deviated from paper color
-    paper_luma = PAPER_COLOR @ np.array([0.299, 0.587, 0.114])
-    luma = canvas @ np.array([0.299, 0.587, 0.114])
-    alpha = np.clip((paper_luma - luma) / max(paper_luma, 1e-6), 0.0, 1.0)
+    # Alpha extraction: Euclidean distance from the shared background.
+    # A soft threshold gives high alpha wherever the canvas deviates from bg,
+    # so strokes remain visible even when this is the only layer.
+    diff = np.linalg.norm(canvas - bg, axis=-1)
+    alpha = np.clip((diff - 0.01) / 0.06, 0.0, 1.0)
     print(f"  generative_curve: {drawn} segments  shape={shape}")
     return canvas, alpha
 
@@ -1128,13 +1132,13 @@ def render_composition(scene_ref, composition=None, write=True, stamp_label=True
                 color, alpha = layer_base_splat(cfg, G, mean2d, cov2d, depths, keep, spec)
             elif layer_type == "surface_walks":
                 color, alpha = layer_surface_walks(
-                    cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec)
+                    cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec, bg=bg)
             elif layer_type == "generative_curve":
                 camera = scene_data.get("camera")
                 if camera is None:
                     raise ValueError("generative_curve requires camera in scene_data")
                 color, alpha = layer_generative_curve(
-                    cfg, camera, ref_img, depths_range, spec)
+                    cfg, camera, ref_img, depths_range, spec, bg=bg)
             else:
                 raise ValueError(f"unknown layer type: {layer_type}")
             if layer_cache is not None:
