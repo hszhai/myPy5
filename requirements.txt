@@ -1,0 +1,18 @@
+# Core runtime (Flask + NumPy CPU renderer)
+flask>=3.0
+numpy<2.0,>=1.22        # numba 0.59.x requires numpy<2.0
+scipy>=1.10
+pillow>=10.0
+matplotlib>=3.7
+
+# JIT compilation for the hot splat/stroke loops
+numba==0.59.1           # 0.60.0 has a binary incompatibility on macOS+x86_64
+llvmlite==0.42.0        # matched to numba 0.59.1
+
+# Optional: py5 sketches / tuning notebooks
+# py5 requires Java 17 and works with numpy 1.26
+# py5>=0.10
+# py5jupyter>=0.2
+
+# Optional: OpenCV (used by some tuning scripts)
+# opencv-python>=4.10

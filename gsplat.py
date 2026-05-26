@@ -16,6 +16,11 @@ whose world Y is "down" (the COLMAP / OpenCV convention from photogrammetry).
 import time
 import numpy as np
 
+try:
+    from numba import njit
+except ImportError:
+    njit = None
+
 SH_C0 = 0.28209479177387814        # DC spherical-harmonic basis value
 
 
@@ -169,15 +174,14 @@ def cull(mean2d, cov2d, opacities, valid_z, W, H, *, sub_pixel=0.7, op_thresh=0.
 
 
 # ---- the splat loop ------------------------------------------------------
-def splat(W, H, mean2d, cov2d, colors, opacities, order, *,
-          bg=(0.06, 0.06, 0.06), verbose=True):
-    """Alpha-composite Gaussians back-to-front into a (H,W,3) image."""
+
+def _splat_fallback(W, H, mean2d, cov2d, colors, opacities, order, bg):
+    """Pure-Python fallback (creates temporaries per-Gaussian)."""
     img = np.full((H, W, 3), bg, dtype=np.float64)
     m2 = mean2d[order]
     C2 = cov2d[order]
     col = colors[order]
     op = opacities[order]
-    t0 = time.time()
     for k in range(len(order)):
         cx, cy = m2[k]
         C = C2[k]
@@ -198,8 +202,71 @@ def splat(W, H, mean2d, cov2d, colors, opacities, order, *,
         q = inv00 * (xs * xs)[None, :] + inv11 * (ys * ys)[:, None] + (2 * inv01) * np.outer(ys, xs)
         a = (op[k] * np.exp(-0.5 * q))[..., None]
         img[y0:y1, x0:x1] = img[y0:y1, x0:x1] * (1.0 - a) + col[k] * a
-        if verbose and k % 30000 == 29999:
-            print(f"  splat {k+1}/{len(order)}   {time.time() - t0:.1f}s")
+    return img
+
+
+if njit is not None:
+    @njit(cache=True)
+    def _splat_numba(W, H, m2, C2, col, op, bg0, bg1, bg2):
+        """Numba-compiled core: zero temporary allocations per Gaussian.
+        Arrays are pre-sliced by `order` in the Python wrapper."""
+        img = np.empty((H, W, 3), dtype=np.float64)
+        for y in range(H):
+            for x in range(W):
+                img[y, x, 0] = bg0
+                img[y, x, 1] = bg1
+                img[y, x, 2] = bg2
+
+        n = len(m2)
+        for k in range(n):
+            cx = m2[k, 0]
+            cy = m2[k, 1]
+            C00 = C2[k, 0, 0]
+            C01 = C2[k, 0, 1]
+            C11 = C2[k, 1, 1]
+            d = C00 * C11 - C01 * C01
+            if d <= 0:
+                continue
+            inv00 = C11 / d
+            inv11 = C00 / d
+            inv01 = -C01 / d
+            rx = 3.0 * np.sqrt(max(C00, 1e-6))
+            ry = 3.0 * np.sqrt(max(C11, 1e-6))
+            x0 = max(int(cx - rx), 0)
+            x1 = min(int(cx + rx) + 1, W)
+            y0 = max(int(cy - ry), 0)
+            y1 = min(int(cy + ry) + 1, H)
+            if x0 >= x1 or y0 >= y1:
+                continue
+
+            op_k = op[k]
+            col0 = col[k, 0]
+            col1 = col[k, 1]
+            col2 = col[k, 2]
+
+            for yi in range(y0, y1):
+                dy = yi - cy
+                for xi in range(x0, x1):
+                    dx = xi - cx
+                    q = inv00 * dx * dx + inv11 * dy * dy + 2.0 * inv01 * dx * dy
+                    a = op_k * np.exp(-0.5 * q)
+                    img[yi, xi, 0] = img[yi, xi, 0] * (1.0 - a) + col0 * a
+                    img[yi, xi, 1] = img[yi, xi, 1] * (1.0 - a) + col1 * a
+                    img[yi, xi, 2] = img[yi, xi, 2] * (1.0 - a) + col2 * a
+
+        return img
+
+
+def splat(W, H, mean2d, cov2d, colors, opacities, order, *,
+          bg=(0.06, 0.06, 0.06), verbose=True):
+    """Alpha-composite Gaussians back-to-front into a (H,W,3) image."""
+    t0 = time.time()
+    if njit is not None:
+        img = _splat_numba(W, H,
+                           mean2d[order], cov2d[order], colors[order], opacities[order],
+                           float(bg[0]), float(bg[1]), float(bg[2]))
+    else:
+        img = _splat_fallback(W, H, mean2d, cov2d, colors, opacities, order, bg)
     if verbose:
         print(f"  splat total: {time.time() - t0:.1f}s")
     return img

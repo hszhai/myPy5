@@ -9,6 +9,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from numba import njit
+except ImportError:
+    njit = None
+
 
 PAPER_COLOR = np.array([0.97, 0.96, 0.93])
 
@@ -75,32 +80,8 @@ def add_line(canvas, x0, y0, x1, y1, color, alpha, W, H, width=1.0):
     canvas[ymin:ymax, xmin:xmax] = sub * (1.0 - a_eff) + color * a_eff
 
 
-def add_splat_stroke(canvas, p0, p1, cov2d, color, alpha, W, H,
-                     n_stamps=5, scale=1.0, min_sigma_px=0.0,
-                     max_sigma_px=None):
-    """Stamp a chain of Gaussian splats along the segment p0 -> p1.
-
-    cov2d  : 2x2 covariance (typically the average of the two endpoint
-             splats' projected covariances; scaled by `scale^2`).
-    n_stamps : how many overlapping splats to place along the segment.
-    min/max_sigma_px : clamp the final projected Gaussian stddev in pixels.
-             This keeps stroke-mode splats brush-like instead of inheriting
-             oversized raw 3DGS splats.
-
-    The stroke therefore carries the splat's actual visual character
-    (anisotropy, size) instead of being a flat line.
-    """
-    cov = cov2d * (scale * scale)
-    if min_sigma_px or max_sigma_px is not None:
-        vals, vecs = np.linalg.eigh(cov)
-        sigmas = np.sqrt(np.maximum(vals, 1e-9))
-        lo = max(float(min_sigma_px), 0.0)
-        hi = None if max_sigma_px is None else max(float(max_sigma_px), lo + 1e-6)
-        sigmas = np.maximum(sigmas, lo)
-        if hi is not None:
-            sigmas = np.minimum(sigmas, hi)
-        cov = (vecs * (sigmas * sigmas)) @ vecs.T
-
+def _add_splat_stroke_fallback(canvas, p0, p1, cov, color, alpha, W, H, n_stamps):
+    """Pure-Python fallback (creates temporaries per-stamp)."""
     det = cov[0, 0] * cov[1, 1] - cov[0, 1] * cov[1, 0]
     if det <= 1e-9:
         return
@@ -123,6 +104,85 @@ def add_splat_stroke(canvas, p0, p1, cov2d, color, alpha, W, H,
             + (2 * inv01) * np.outer(ys, xs)
         a = (alpha * np.exp(-0.5 * q))[..., None]
         canvas[y0i:y1i, x0i:x1i] = canvas[y0i:y1i, x0i:x1i] * (1.0 - a) + color * a
+
+
+if njit is not None:
+    @njit(cache=True)
+    def _add_splat_stroke_numba(canvas, p0x, p0y, p1x, p1y,
+                                cov00, cov01, cov11,
+                                color0, color1, color2,
+                                alpha, W, H, n_stamps):
+        """Numba-compiled core: zero temporary allocations per stamp."""
+        det = cov00 * cov11 - cov01 * cov01
+        if det <= 1e-9:
+            return
+        inv00 = cov11 / det
+        inv11 = cov00 / det
+        inv01 = -cov01 / det
+        rx = 3.0 * np.sqrt(max(cov00, 1e-6))
+        ry = 3.0 * np.sqrt(max(cov11, 1e-6))
+
+        for i in range(n_stamps):
+            if n_stamps > 1:
+                t = i / (n_stamps - 1)
+            else:
+                t = 0.0
+            cx = p0x + t * (p1x - p0x)
+            cy = p0y + t * (p1y - p0y)
+            x0i = max(int(cx - rx), 0)
+            x1i = min(int(cx + rx) + 1, W)
+            y0i = max(int(cy - ry), 0)
+            y1i = min(int(cy + ry) + 1, H)
+            if x0i >= x1i or y0i >= y1i:
+                continue
+
+            for yi in range(y0i, y1i):
+                dy = yi - cy
+                for xi in range(x0i, x1i):
+                    dx = xi - cx
+                    q = inv00 * dx * dx + inv11 * dy * dy + 2.0 * inv01 * dx * dy
+                    a = alpha * np.exp(-0.5 * q)
+                    canvas[yi, xi, 0] = canvas[yi, xi, 0] * (1.0 - a) + color0 * a
+                    canvas[yi, xi, 1] = canvas[yi, xi, 1] * (1.0 - a) + color1 * a
+                    canvas[yi, xi, 2] = canvas[yi, xi, 2] * (1.0 - a) + color2 * a
+
+
+def add_splat_stroke(canvas, p0, p1, cov2d, color, alpha, W, H,
+                     n_stamps=5, scale=1.0, min_sigma_px=0.0,
+                     max_sigma_px=None):
+    """Stamp a chain of Gaussian splats along the segment p0 -> p1.
+
+    cov2d  : 2x2 covariance (typically the average of the two endpoint
+             splats' projected covariances; scaled by `scale^2`).
+    n_stamps : how many overlapping splats to place along the segment.
+    min/max_sigma_px : clamp the final projected Gaussian stddev in pixels.
+             This keeps stroke-mode splats brush-like instead of inheriting
+             oversized raw 3DGS splats.
+
+    The stroke therefore carries the splat's actual visual character
+    (anisotropy, size) instead of being a flat line.
+    """
+    # Pre-process covariance in Python (eigh clamping not worth JITting for 2x2)
+    cov = cov2d * (scale * scale)
+    if min_sigma_px or max_sigma_px is not None:
+        vals, vecs = np.linalg.eigh(cov)
+        sigmas = np.sqrt(np.maximum(vals, 1e-9))
+        lo = max(float(min_sigma_px), 0.0)
+        hi = None if max_sigma_px is None else max(float(max_sigma_px), lo + 1e-6)
+        sigmas = np.maximum(sigmas, lo)
+        if hi is not None:
+            sigmas = np.minimum(sigmas, hi)
+        cov = (vecs * (sigmas * sigmas)) @ vecs.T
+
+    if njit is not None:
+        _add_splat_stroke_numba(
+            canvas, float(p0[0]), float(p0[1]), float(p1[0]), float(p1[1]),
+            float(cov[0, 0]), float(cov[0, 1]), float(cov[1, 1]),
+            float(color[0]), float(color[1]), float(color[2]),
+            float(alpha), int(W), int(H), int(n_stamps),
+        )
+    else:
+        _add_splat_stroke_fallback(canvas, p0, p1, cov, color, alpha, W, H, n_stamps)
 
 
 def stamp(canvas, text, W, H):
