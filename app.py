@@ -113,6 +113,12 @@ def _hydrate_layer(layer):
             params.setdefault(k, v)
         for c in "rgb":
             params.setdefault(f"ink_{c}", 0.0)
+    if layer.get("type") == "generative_curve":
+        params = layer.setdefault("params", {})
+        for c in "rgb":
+            params.setdefault(f"color_{c}", 0.0)
+        params.setdefault("depth_focus", 0.5)
+        params.setdefault("depth_blur", 0.0)
 
 
 def _load_composition():
@@ -140,6 +146,20 @@ ADD_TEMPLATES = {
             "ink_r": 0.0, "ink_g": 0.0, "ink_b": 0.0,
             "placement": "saliency", "stroke_mode": "line", "stroke_width": 1.0,
             "seed": 17,
+        },
+        **_MASK3D_DEFAULTS,
+    },
+    "generative_curve": {
+        "name": "curve", "type": "generative_curve", "enabled": True, "alpha": 0.9,
+        "params": {
+            "shape": "sphere", "n_points": 200, "radius": 0.6,
+            "seed": 17, "stroke_mode": "splat", "stroke_alpha": 0.6,
+            "splat_scale": 0.4, "splat_alpha_scale": 0.35,
+            "splat_min_sigma": 0.10, "splat_max_sigma": 1.20,
+            "n_stamps": 5, "color_mode": "fixed",
+            "color_r": 0.9, "color_g": 0.3, "color_b": 0.1,
+            "depth_focus": 0.5, "depth_blur": 0.0,
+            "line_jitter": 0.0, "connect_closest": False,
         },
         **_MASK3D_DEFAULTS,
     },

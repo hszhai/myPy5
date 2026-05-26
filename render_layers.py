@@ -210,6 +210,30 @@ LAYER_PARAM_SCHEMAS = {
             ("seed",              "seed",          "int",   "{:.0f}", None),
         ] + MASK3D_FIELDS,
     },
+    "generative_curve": {
+        "params_in": "params",
+        "fields": [
+            ("shape",             "shape",         "str",   "{:s}",   ["sphere", "ring", "random_walk", "lorenz"]),
+            ("n_points",          "points",        "int",   "{:.0f}", None),
+            ("radius",            "radius",        "float", "{:.2f}", None),
+            ("center_offset",     "center",        "vec3",  "{:.2f}", None),
+            ("seed",              "seed",          "int",   "{:.0f}", None),
+            ("stroke_alpha",      "stroke alpha",  "float", "{:.2f}", None),
+            ("stroke_mode",       "stroke mode",   "str",   "{:s}",   ["line", "splat"]),
+            ("stroke_width",      "line width",    "float", "{:.1f}", None),
+            ("splat_scale",       "splat scale",   "float", "{:.2f}", None),
+            ("splat_alpha_scale", "splat a-scale", "float", "{:.2f}", None),
+            ("splat_min_sigma",   "splat sig min", "float", "{:.2f}", None),
+            ("splat_max_sigma",   "splat sig max", "float", "{:.2f}", None),
+            ("n_stamps",          "stamps/seg",    "int",   "{:.0f}", None),
+            ("color_mode",        "color mode",    "str",   "{:s}",   ["fixed", "ref", "depth"]),
+            ("color",             "color",         "rgb",   "{:.2f}", None),
+            ("depth_focus",       "depth focus",   "float", "{:.2f}", None),
+            ("depth_blur",        "depth blur",    "float", "{:.2f}", None),
+            ("line_jitter",       "jitter",        "float", "{:.2f}", None),
+            ("connect_closest",   "closest conn",  "bool",  "",       None),
+        ] + MASK3D_FIELDS,
+    },
 }
 
 
@@ -623,6 +647,249 @@ def layer_surface_walks(cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec):
     return line_canvas, alpha
 
 
+# ----------------------------------------------------------------------
+# Generative curve layer
+# ----------------------------------------------------------------------
+
+def _generate_curve_points(shape, n_points, radius, center, seed, **kwargs):
+    """Generate a 3D point cloud for the generative-curve layer."""
+    rng = np.random.default_rng(int(seed))
+    center = np.asarray(center, dtype=np.float64)
+
+    if shape == "sphere":
+        # Uniform inside a sphere
+        u = rng.random(n_points)
+        r = radius * np.cbrt(u)
+        theta = np.arccos(2 * rng.random(n_points) - 1)
+        phi = 2 * np.pi * rng.random(n_points)
+        pts = np.column_stack([
+            r * np.sin(theta) * np.cos(phi),
+            r * np.sin(theta) * np.sin(phi),
+            r * np.cos(theta),
+        ])
+
+    elif shape == "ring":
+        # Tilted ring / torus
+        tilt_x = float(kwargs.get("tilt_x", 0.0))
+        tilt_y = float(kwargs.get("tilt_y", 0.0))
+        t = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+        # Add slight thickness
+        tube_r = radius * 0.15
+        tube_u = rng.random(n_points)
+        tube_theta = 2 * np.pi * rng.random(n_points)
+        r_eff = radius + tube_r * np.cos(tube_theta)
+        z_off = tube_r * np.sin(tube_theta)
+        pts = np.column_stack([
+            r_eff * np.cos(t),
+            r_eff * np.sin(t),
+            z_off,
+        ])
+        # Apply tilt
+        if tilt_x != 0:
+            cx, sx = np.cos(np.radians(tilt_x)), np.sin(np.radians(tilt_x))
+            Rxt = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+            pts = pts @ Rxt.T
+        if tilt_y != 0:
+            cy, sy = np.cos(np.radians(tilt_y)), np.sin(np.radians(tilt_y))
+            Ryt = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+            pts = pts @ Ryt.T
+
+    elif shape == "random_walk":
+        # 3D random walk with momentum
+        steps = n_points - 1
+        momentum = float(kwargs.get("momentum", 0.7))
+        pts = np.zeros((n_points, 3), dtype=np.float64)
+        dir_vec = rng.normal(size=3)
+        dir_vec /= np.linalg.norm(dir_vec) + 1e-9
+        step_len = radius * 0.05
+        for i in range(1, n_points):
+            new_dir = rng.normal(size=3)
+            new_dir /= np.linalg.norm(new_dir) + 1e-9
+            dir_vec = momentum * dir_vec + (1.0 - momentum) * new_dir
+            dir_vec /= np.linalg.norm(dir_vec) + 1e-9
+            pts[i] = pts[i - 1] + dir_vec * step_len
+
+    elif shape == "lorenz":
+        # Lorenz attractor
+        sigma, rho, beta = 10.0, 28.0, 8.0 / 3.0
+        dt = 0.01
+        n_steps = n_points * 10
+        xyz = np.zeros((n_steps, 3), dtype=np.float64)
+        xyz[0] = rng.normal(size=3) * 0.1
+        for i in range(1, n_steps):
+            x, y, z = xyz[i - 1]
+            dx = sigma * (y - x)
+            dy = x * (rho - z) - y
+            dz = x * y - beta * z
+            xyz[i] = xyz[i - 1] + np.array([dx, dy, dz]) * dt
+        # Subsample and scale
+        idx = np.linspace(0, n_steps - 1, n_points).astype(int)
+        pts = xyz[idx]
+        # Normalize to radius
+        pts_max = np.abs(pts).max()
+        if pts_max > 1e-9:
+            pts = pts / pts_max * radius
+
+    else:
+        raise ValueError(f"unknown generative curve shape: {shape}")
+
+    return pts + center
+
+
+def _project_curve_points(pts_3d, camera, W, H):
+    """Project world-space points to 2D using the scene camera.
+    Returns (mean2d, depths, valid).
+    """
+    cam_xyz = (pts_3d - camera["center"]) @ camera["Rcam"].T
+    cam_xyz[:, 2] += camera["distance"]
+    Z = cam_xyz[:, 2]
+    valid = Z > 1e-3
+    safe_Z = np.where(valid, Z, 1.0)
+    invZ = 1.0 / safe_Z
+    mean2d = np.column_stack([
+        W / 2 + camera["focal"] * cam_xyz[:, 0] * invZ,
+        H / 2 + camera["ysign"] * camera["focal"] * cam_xyz[:, 1] * invZ,
+    ])
+    return mean2d, Z, valid
+
+
+def layer_generative_curve(cfg, camera, ref_img, depths_range, spec):
+    """Render a procedurally-generated 3D curve with splats or lines.
+
+    Generates N points in a 3D shape (sphere, ring, random walk, lorenz),
+    projects them through the scene camera, and draws the polyline.
+    Supports depth-of-field blur, reference-image color sampling, and
+    both line and splat stroke modes.
+    """
+    params = spec.get("params", {})
+    shape = params.get("shape", "sphere")
+    n_points = int(params.get("n_points", 200))
+    radius = float(params.get("radius", 0.5))
+    seed = int(params.get("seed", 17))
+    stroke_alpha = float(params.get("stroke_alpha", 0.6))
+    stroke_mode = params.get("stroke_mode", "splat")
+    stroke_width = float(params.get("stroke_width", 1.0))
+    splat_scale = float(params.get("splat_scale", 0.35))
+    splat_alpha_scale = float(params.get("splat_alpha_scale", 0.35))
+    splat_min_sigma = float(params.get("splat_min_sigma", 0.10))
+    splat_max_sigma = params.get("splat_max_sigma")
+    splat_max_sigma = None if splat_max_sigma is None else float(splat_max_sigma)
+    n_stamps = int(params.get("n_stamps", 5))
+    color_mode = params.get("color_mode", "fixed")
+    depth_focus = float(params.get("depth_focus", 0.5))
+    depth_blur = float(params.get("depth_blur", 0.0))
+    line_jitter = float(params.get("line_jitter", 0.0))
+    connect_closest = bool(params.get("connect_closest", False))
+
+    # Center offset from the layer spec (vec3 expands to cx/cy/cz)
+    cx = float(params.get("cx", 0.0))
+    cy = float(params.get("cy", 0.0))
+    cz = float(params.get("cz", 0.0))
+    center_offset = np.array([cx, cy, cz], dtype=np.float64)
+
+    # Generate 3D points
+    pts_3d = _generate_curve_points(
+        shape, n_points, radius, center_offset, seed,
+        tilt_x=float(params.get("tilt_x", 0.0)),
+        tilt_y=float(params.get("tilt_y", 0.0)),
+        momentum=float(params.get("momentum", 0.7)),
+    )
+
+    # Project to 2D
+    pts_2d, depths, valid = _project_curve_points(pts_3d, camera, cfg.W, cfg.H)
+
+    # Build segment order
+    if connect_closest:
+        # Greedy nearest-neighbor path (Travelling-Salesman-ish)
+        order = [0]
+        remain = set(range(1, n_points))
+        while remain:
+            last = order[-1]
+            best = min(remain, key=lambda i: np.sum((pts_2d[i] - pts_2d[last])**2))
+            order.append(best)
+            remain.remove(best)
+    else:
+        order = list(range(n_points))
+
+    # Fixed color
+    color_fixed = np.array([
+        float(params.get("color_r", 0.0)),
+        float(params.get("color_g", 0.0)),
+        float(params.get("color_b", 0.0)),
+    ], dtype=np.float64)
+
+    # Depth range for blur
+    if depths_range is not None:
+        d_lo, d_hi = depths_range
+    else:
+        d_lo, d_hi = float(depths[valid].min()), float(depths[valid].max())
+    drange = max(d_hi - d_lo, 1e-6)
+    focus_d = d_lo + np.clip(depth_focus, 0.0, 1.0) * drange
+
+    canvas = np.tile(PAPER_COLOR, (cfg.H, cfg.W, 1)).astype(np.float64)
+    drawn = 0
+
+    for i in range(len(order) - 1):
+        a_idx, b_idx = order[i], order[i + 1]
+        if not (valid[a_idx] and valid[b_idx]):
+            continue
+
+        p0 = np.asarray(pts_2d[a_idx], dtype=np.float64).copy()
+        p1 = np.asarray(pts_2d[b_idx], dtype=np.float64).copy()
+
+        # Line jitter
+        if line_jitter > 0:
+            jitter = np.random.default_rng(seed + i).normal(scale=line_jitter, size=2)
+            p1 += jitter
+
+        # Color
+        if color_mode == "ref":
+            mx = int(np.clip((p0[0] + p1[0]) / 2, 0, cfg.W - 1))
+            my = int(np.clip((p0[1] + p1[1]) / 2, 0, cfg.H - 1))
+            seg_color = ref_img[my, mx]
+        elif color_mode == "depth":
+            z = (depths[a_idx] + depths[b_idx]) / 2.0
+            t = np.clip((z - d_lo) / drange, 0.0, 1.0)
+            seg_color = np.array([t, 1.0 - t, 0.5], dtype=np.float64)
+        else:
+            seg_color = color_fixed
+
+        # Depth blur: fade alpha and scale covariance by distance from focus
+        seg_alpha = stroke_alpha
+        seg_splat_scale = splat_scale
+        if depth_blur > 0.0:
+            z = (depths[a_idx] + depths[b_idx]) / 2.0
+            dist = np.abs(z - focus_d) / drange
+            blur_f = depth_blur * dist
+            seg_alpha = stroke_alpha * np.clip(1.0 - 0.7 * blur_f, 0.05, 1.0)
+            seg_splat_scale = splat_scale * (1.0 + 3.0 * blur_f)
+
+        if stroke_mode == "splat":
+            # Synthetic isotropic covariance scaled by depth blur
+            seg_len = np.linalg.norm(p1 - p0)
+            sigma = max(seg_len * 0.3, 2.0) * seg_splat_scale
+            cov = np.array([[sigma, 0.0], [0.0, sigma]], dtype=np.float64)
+            add_splat_stroke(
+                canvas, p0, p1, cov, seg_color,
+                seg_alpha * splat_alpha_scale,
+                cfg.W, cfg.H, n_stamps=n_stamps,
+                scale=1.0,
+                min_sigma_px=splat_min_sigma,
+                max_sigma_px=splat_max_sigma,
+            )
+        else:
+            add_line(canvas, p0[0], p0[1], p1[0], p1[1],
+                     seg_color, seg_alpha, cfg.W, cfg.H, width=stroke_width)
+        drawn += 1
+
+    # Alpha = how much we deviated from paper color
+    paper_luma = PAPER_COLOR @ np.array([0.299, 0.587, 0.114])
+    luma = canvas @ np.array([0.299, 0.587, 0.114])
+    alpha = np.clip((paper_luma - luma) / max(paper_luma, 1e-6), 0.0, 1.0)
+    print(f"  generative_curve: {drawn} segments  shape={shape}")
+    return canvas, alpha
+
+
 _HASH_EXCLUDE = {"enabled", "alpha", "name",
                  "_ui_y", "_ui_h", "_ui_collapsed", "_ui_section"}
 # Note: mask3d_*, depth_*, curvature_* all affect the layer's intrinsic render,
@@ -837,6 +1104,11 @@ def render_composition(scene_ref, composition=None, write=True, stamp_label=True
     out_path = comp.get("out") or f"images/{cfg.SCENE_NAME}_layers.png"
     bg = np.asarray(comp.get("background", PAPER_COLOR), dtype=np.float64)
 
+    # Pre-compute scene depth range for generative-curve depth blur
+    depths_range = None
+    if len(keep) > 0:
+        depths_range = (float(depths[keep].min()), float(depths[keep].max()))
+
     canvas = np.tile(bg, (cfg.H, cfg.W, 1)).astype(np.float64)
     for spec in layers:
         if not spec.get("enabled", True):
@@ -857,6 +1129,12 @@ def render_composition(scene_ref, composition=None, write=True, stamp_label=True
             elif layer_type == "surface_walks":
                 color, alpha = layer_surface_walks(
                     cfg, G, mean2d, cov2d, keep, ref_img, saliency, spec)
+            elif layer_type == "generative_curve":
+                camera = scene_data.get("camera")
+                if camera is None:
+                    raise ValueError("generative_curve requires camera in scene_data")
+                color, alpha = layer_generative_curve(
+                    cfg, camera, ref_img, depths_range, spec)
             else:
                 raise ValueError(f"unknown layer type: {layer_type}")
             if layer_cache is not None:

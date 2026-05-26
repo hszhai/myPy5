@@ -117,13 +117,14 @@ BTN_SAVE_IMG   = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW1_Y, w=_BTN_W
 BTN_SAVE_SCENE = dict(x=PANEL_X,                         y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
 BTN_ADD_SPLAT  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW2_Y, w=_BTN_W, h=_BTN_H)
 BTN_ADD_WALKS  = dict(x=PANEL_X,                         y=_BTN_ROW2_Y + _BTN_H + _BTN_GAP, w=_BTN_W, h=_BTN_H)
+BTN_ADD_CURVE  = dict(x=PANEL_X + (_BTN_W + _BTN_GAP),   y=_BTN_ROW2_Y + _BTN_H + _BTN_GAP, w=_BTN_W, h=_BTN_H)
 
 # Layer block layout: the chevron + checkbox + name + alpha live in the header row.
 TRI_W = 12
 TRI_GAP = 8
 CHECK_W = 18
 
-LAYERS_START_Y = _BTN_ROW2_Y + _BTN_H + 16
+LAYERS_START_Y = _BTN_ROW2_Y + _BTN_H * 2 + _BTN_GAP + 16
 
 # Templates used when "+ SPLAT" / "+ WALKS" buttons add a new layer.
 ADD_SPLAT_TEMPLATE = {
@@ -157,6 +158,31 @@ ADD_WALKS_TEMPLATE = {
         "stroke_mode": "line",
         "stroke_width": 1.0,
         "seed": 17,
+    },
+}
+ADD_CURVE_TEMPLATE = {
+    "name": "curve",
+    "type": "generative_curve",
+    "enabled": True,
+    "alpha": 0.9,
+    "params": {
+        "shape": "sphere",
+        "n_points": 200,
+        "radius": 0.6,
+        "seed": 17,
+        "stroke_mode": "splat",
+        "stroke_alpha": 0.6,
+        "splat_scale": 0.4,
+        "splat_alpha_scale": 0.35,
+        "splat_min_sigma": 0.10,
+        "splat_max_sigma": 1.20,
+        "n_stamps": 5,
+        "color_mode": "fixed",
+        "color_r": 0.9, "color_g": 0.3, "color_b": 0.1,
+        "depth_focus": 0.5,
+        "depth_blur": 0.0,
+        "line_jitter": 0.0,
+        "connect_closest": False,
     },
 }
 
@@ -206,6 +232,13 @@ def _hydrate_layer(layer):
         params.setdefault("ink_r", 0.0)
         params.setdefault("ink_g", 0.0)
         params.setdefault("ink_b", 0.0)
+    if layer.get("type") == "generative_curve":
+        params = layer.setdefault("params", {})
+        params.setdefault("color_r", 0.0)
+        params.setdefault("color_g", 0.0)
+        params.setdefault("color_b", 0.0)
+        params.setdefault("depth_focus", 0.5)
+        params.setdefault("depth_blur", 0.0)
 
 
 def _load_composition():
@@ -462,6 +495,7 @@ def draw():
     _draw_button(BTN_SAVE_SCENE, "SAVE SCENE (s)",  (70, 110, 170), (110, 150, 200))
     _draw_button(BTN_ADD_SPLAT,  "+ SPLAT",         (60, 130, 90),  (90, 165, 120))
     _draw_button(BTN_ADD_WALKS,  "+ WALKS",         (60, 130, 90),  (90, 165, 120))
+    _draw_button(BTN_ADD_CURVE,  "+ CURVE",         (60, 130, 90),  (90, 165, 120))
 
     _draw_camera_panel()
     _draw_wireframe_view()
@@ -996,6 +1030,10 @@ def mouse_pressed():
         _unfocus_all_commit()
         do_add_layer("walks")
         return
+    if _hit(BTN_ADD_CURVE):
+        _unfocus_all_commit()
+        do_add_layer("curve")
+        return
 
     # Chevron clicks -- toggle collapse for the matching layer.
     for c in chevrons:
@@ -1170,6 +1208,9 @@ def do_add_layer(kind):
     elif kind == "walks":
         new_layer = deepcopy(ADD_WALKS_TEMPLATE)
         new_layer["name"] = _unique_layer_name("walks")
+    elif kind == "curve":
+        new_layer = deepcopy(ADD_CURVE_TEMPLATE)
+        new_layer["name"] = _unique_layer_name("curve")
     else:
         return
     composition["layers"].append(new_layer)
