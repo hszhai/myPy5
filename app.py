@@ -119,6 +119,32 @@ def _hydrate_layer(layer):
             params.setdefault(f"color_{c}", 0.0)
         params.setdefault("depth_focus", 0.5)
         params.setdefault("depth_blur", 0.0)
+    if layer.get("type") == "zline":
+        params = layer.setdefault("params", {})
+        for c in "rgb":
+            params.setdefault(f"color_{c}", 0.0)
+        params.setdefault("p1_x", -0.3)
+        params.setdefault("p1_y", 0.0)
+        params.setdefault("p1_z", 0.0)
+        params.setdefault("p2_x", 0.3)
+        params.setdefault("p2_y", 0.0)
+        params.setdefault("p2_z", 0.0)
+        params.setdefault("show_endpoints", False)
+        params.setdefault("n_lines", 5)
+        params.setdefault("recursion", 2)
+        params.setdefault("displacement", 0.3)
+        params.setdefault("displacement_decay", 0.5)
+        params.setdefault("neighborhood_range", 0.1)
+        params.setdefault("seed", 17)
+        params.setdefault("stroke_alpha", 0.7)
+        params.setdefault("stroke_mode", "line")
+        params.setdefault("stroke_width", 1.0)
+        params.setdefault("splat_scale", 0.35)
+        params.setdefault("splat_alpha_scale", 0.35)
+        params.setdefault("splat_min_sigma", 0.10)
+        params.setdefault("n_stamps", 5)
+        params.setdefault("color_mode", "fixed")
+        params.setdefault("line_jitter", 0.0)
 
 
 def _load_composition():
@@ -160,6 +186,25 @@ ADD_TEMPLATES = {
             "color_r": 0.9, "color_g": 0.3, "color_b": 0.1,
             "depth_focus": 0.5, "depth_blur": 0.0,
             "line_jitter": 0.0, "connect_closest": False,
+        },
+        **_MASK3D_DEFAULTS,
+    },
+    "zline": {
+        "name": "zline", "type": "zline", "enabled": True, "alpha": 0.9,
+        "params": {
+            "p1_x": -0.3, "p1_y": 0.0, "p1_z": 0.0,
+            "p2_x": 0.3, "p2_y": 0.0, "p2_z": 0.0,
+            "show_endpoints": False,
+            "n_lines": 5, "recursion": 2,
+            "displacement": 0.3, "displacement_decay": 0.5,
+            "neighborhood_range": 0.1,
+            "seed": 17, "stroke_mode": "line", "stroke_alpha": 0.7,
+            "stroke_width": 1.0,
+            "splat_scale": 0.35, "splat_alpha_scale": 0.35,
+            "splat_min_sigma": 0.10, "splat_max_sigma": 1.20,
+            "n_stamps": 5, "color_mode": "fixed",
+            "color_r": 0.0, "color_g": 0.0, "color_b": 0.0,
+            "line_jitter": 0.0,
         },
         **_MASK3D_DEFAULTS,
     },
@@ -246,6 +291,7 @@ def index():
 def api_init():
     bb_min, bb_max = scene_data["bbox"]
     dens_lo, dens_hi = scene_data["density_bbox"]
+    cam = scene_data.get("camera", {})
     return jsonify({
         "scene": {
             "name": cfg.SCENE_NAME,
@@ -255,6 +301,12 @@ def api_init():
             "density_min": dens_lo.tolist(),
             "density_max": dens_hi.tolist(),
             "render_size": [int(cfg.W), int(cfg.H)],
+            "center": cam.get("center").tolist() if hasattr(cam.get("center"), 'tolist') else (cam.get("center") or [0.0, 0.0, 0.0]),
+            "Rcam": cam.get("Rcam").tolist() if hasattr(cam.get("Rcam"), 'tolist') else None,
+            "focal": float(cam.get("focal", 1.0)) if cam.get("focal") is not None else None,
+            "distance": float(cam.get("distance", 1.0)) if cam.get("distance") is not None else None,
+            "ysign": float(cam.get("ysign", -1.0)) if cam.get("ysign") is not None else -1.0,
+            "extent": float(cam.get("distance", 1.0)) / max(float(getattr(cfg, "DISTANCE_K", 1.0)), 1e-6),
         },
         "camera": _camera_dict(),
         "schema": LAYER_PARAM_SCHEMAS,

@@ -234,6 +234,31 @@ LAYER_PARAM_SCHEMAS = {
             ("connect_closest",   "closest conn",  "bool",  "",       None),
         ] + MASK3D_FIELDS,
     },
+    "zline": {
+        "params_in": "params",
+        "fields": [
+            ("p1",                "P1",            "vec3",  "{:.2f}", None),
+            ("p2",                "P2",            "vec3",  "{:.2f}", None),
+            ("show_endpoints",    "show ends",     "bool",  "",       None),
+            ("n_lines",           "N lines",       "int",   "{:.0f}", None),
+            ("recursion",         "recursion",     "int",   "{:.0f}", None),
+            ("displacement",      "displacement",  "float", "{:.2f}", None),
+            ("displacement_decay","decay",         "float", "{:.2f}", None),
+            ("neighborhood_range","range",         "float", "{:.2f}", None),
+            ("seed",              "seed",          "int",   "{:.0f}", None),
+            ("stroke_alpha",      "stroke alpha",  "float", "{:.2f}", None),
+            ("stroke_mode",       "stroke mode",   "str",   "{:s}",   ["line", "splat"]),
+            ("stroke_width",      "line width",    "float", "{:.1f}", None),
+            ("splat_scale",       "splat scale",   "float", "{:.2f}", None),
+            ("splat_alpha_scale", "splat a-scale", "float", "{:.2f}", None),
+            ("splat_min_sigma",   "splat sig min", "float", "{:.2f}", None),
+            ("splat_max_sigma",   "splat sig max", "float", "{:.2f}", None),
+            ("n_stamps",          "stamps/seg",    "int",   "{:.0f}", None),
+            ("color_mode",        "color mode",    "str",   "{:s}",   ["fixed", "ref"]),
+            ("color",             "color",         "rgb",   "{:.2f}", None),
+            ("line_jitter",       "jitter",        "float", "{:.2f}", None),
+        ] + MASK3D_FIELDS,
+    },
 }
 
 
@@ -789,9 +814,11 @@ def layer_generative_curve(cfg, camera, ref_img, depths_range, spec, bg=PAPER_CO
     cz = float(params.get("cz", 0.0))
     center_offset = np.array([cx, cy, cz], dtype=np.float64)
 
-    # Generate 3D points
+    # Generate 3D points around the scene camera centre so the curve
+    # appears in front of the rendered scene by default.
+    curve_center = camera["center"] + center_offset
     pts_3d = _generate_curve_points(
-        shape, n_points, radius, center_offset, seed,
+        shape, n_points, radius, curve_center, seed,
         tilt_x=float(params.get("tilt_x", 0.0)),
         tilt_y=float(params.get("tilt_y", 0.0)),
         momentum=float(params.get("momentum", 0.7)),
@@ -891,6 +918,152 @@ def layer_generative_curve(cfg, camera, ref_img, depths_range, spec, bg=PAPER_CO
     diff = np.linalg.norm(canvas - bg, axis=-1)
     alpha = np.clip((diff - 0.01) / 0.06, 0.0, 1.0)
     print(f"  generative_curve: {drawn} segments  shape={shape}")
+    return canvas, alpha
+
+
+def _midpoint_displace_3d(p1, p2, recursion, displacement, decay, rng):
+    """Recursively displace midpoints in a random perpendicular direction.
+
+    Returns a polyline as a list of 3-D arrays.
+    """
+    pts = [np.asarray(p1, dtype=np.float64), np.asarray(p2, dtype=np.float64)]
+    for level in range(recursion):
+        new_pts = [pts[0]]
+        for i in range(len(pts) - 1):
+            a = pts[i]
+            b = pts[i + 1]
+            mid = (a + b) * 0.5
+            dx = b - a
+            seg_len = np.linalg.norm(dx)
+            if seg_len > 1e-9:
+                # Random unit vector, then project out the axial component
+                rand_dir = rng.normal(size=3)
+                rand_dir /= np.linalg.norm(rand_dir) + 1e-9
+                dx_unit = dx / seg_len
+                perp = rand_dir - np.dot(rand_dir, dx_unit) * dx_unit
+                perp_norm = np.linalg.norm(perp)
+                if perp_norm > 1e-9:
+                    perp /= perp_norm
+                    max_disp = seg_len * displacement * (decay ** level)
+                    disp = rng.uniform(-max_disp, max_disp)
+                    mid += perp * disp
+            new_pts.append(mid)
+            new_pts.append(b)
+        pts = new_pts
+    return pts
+
+
+def layer_zline(cfg, camera, ref_img, spec, bg=PAPER_COLOR):
+    """Render a cluster of 3-D recursive midpoint-displacement zigzag lines.
+
+    P1 and P2 are world-space endpoints.  Each line in the cluster is spawned
+    in a neighborhood around P1/P2 (controlled by `neighborhood_range`), then
+    midpoint-displaced in 3-D and projected through the scene camera.
+    """
+    params = spec.get("params", {})
+    # P1 / P2 are stored as offsets from the scene camera centre so that
+    # (0,0,0) always lands on the scene content regardless of world coords.
+    p1 = camera["center"] + np.array([
+        float(params.get("p1_x", -0.3)),
+        float(params.get("p1_y", 0.0)),
+        float(params.get("p1_z", 0.0)),
+    ], dtype=np.float64)
+    p2 = camera["center"] + np.array([
+        float(params.get("p2_x", 0.3)),
+        float(params.get("p2_y", 0.0)),
+        float(params.get("p2_z", 0.0)),
+    ], dtype=np.float64)
+    show_endpoints = bool(params.get("show_endpoints", False))
+    n_lines = int(params.get("n_lines", 5))
+    recursion = int(params.get("recursion", 2))
+    displacement = float(params.get("displacement", 0.3))
+    decay = float(params.get("displacement_decay", 0.5))
+    neighborhood_range = float(params.get("neighborhood_range", 0.1))
+    seed = int(params.get("seed", 17))
+    stroke_alpha = float(params.get("stroke_alpha", 0.7))
+    stroke_mode = params.get("stroke_mode", "line")
+    stroke_width = float(params.get("stroke_width", 1.0))
+    color_mode = params.get("color_mode", "fixed")
+    line_jitter = float(params.get("line_jitter", 0.0))
+
+    # Splat params
+    splat_scale = float(params.get("splat_scale", 0.35))
+    splat_alpha_scale = float(params.get("splat_alpha_scale", 0.35))
+    splat_min_sigma = float(params.get("splat_min_sigma", 0.10))
+    splat_max_sigma = params.get("splat_max_sigma")
+    splat_max_sigma = None if splat_max_sigma is None else float(splat_max_sigma)
+    n_stamps = int(params.get("n_stamps", 5))
+
+    # Fixed color
+    color_fixed = np.array([
+        float(params.get("color_r", 0.0)),
+        float(params.get("color_g", 0.0)),
+        float(params.get("color_b", 0.0)),
+    ], dtype=np.float64)
+
+    W, H = cfg.W, cfg.H
+    bg = np.asarray(bg, dtype=np.float64)
+    canvas = np.tile(bg, (H, W, 1)).astype(np.float64)
+
+    rng = np.random.default_rng(seed)
+
+    drawn = 0
+    for li in range(n_lines):
+        line_rng = np.random.default_rng(seed + li + 1)
+
+        # Spawn endpoints in a neighborhood around P1 / P2
+        offset1 = line_rng.normal(scale=neighborhood_range, size=3) if neighborhood_range > 0 else np.zeros(3)
+        offset2 = line_rng.normal(scale=neighborhood_range, size=3) if neighborhood_range > 0 else np.zeros(3)
+        line_p1 = p1 + offset1
+        line_p2 = p2 + offset2
+
+        # Generate 3-D polyline via midpoint displacement
+        pts_3d = _midpoint_displace_3d(line_p1, line_p2, recursion, displacement, decay, line_rng)
+        pts_3d = np.stack(pts_3d, axis=0)
+
+        # Project through scene camera
+        pts_2d, depths, valid = _project_curve_points(pts_3d, camera, W, H)
+
+        # Draw projected segments
+        for i in range(len(pts_2d) - 1):
+            if not (valid[i] and valid[i + 1]):
+                continue
+            a = np.asarray(pts_2d[i], dtype=np.float64)
+            b = np.asarray(pts_2d[i + 1], dtype=np.float64)
+
+            # Line jitter in 2-D (pixels)
+            if line_jitter > 0:
+                jitter = line_rng.normal(scale=line_jitter, size=2)
+                b = b + jitter
+
+            # Color
+            if color_mode == "ref":
+                mx = int(np.clip((a[0] + b[0]) * 0.5, 0, W - 1))
+                my = int(np.clip((a[1] + b[1]) * 0.5, 0, H - 1))
+                seg_color = ref_img[my, mx]
+            else:
+                seg_color = color_fixed
+
+            if stroke_mode == "splat":
+                seg_len = np.linalg.norm(b - a)
+                sigma = max(seg_len * 0.3, 2.0) * splat_scale
+                cov = np.array([[sigma, 0.0], [0.0, sigma]], dtype=np.float64)
+                add_splat_stroke(
+                    canvas, a, b, cov, seg_color,
+                    stroke_alpha * splat_alpha_scale,
+                    W, H, n_stamps=n_stamps,
+                    scale=1.0,
+                    min_sigma_px=splat_min_sigma,
+                    max_sigma_px=splat_max_sigma,
+                )
+            else:
+                add_line(canvas, a[0], a[1], b[0], b[1],
+                         seg_color, stroke_alpha, W, H, width=stroke_width)
+            drawn += 1
+
+    diff = np.linalg.norm(canvas - bg, axis=-1)
+    alpha = np.clip((diff - 0.01) / 0.06, 0.0, 1.0)
+    print(f"  zline: {n_lines} lines  {drawn} segments  recursion={recursion}")
     return canvas, alpha
 
 
@@ -1139,6 +1312,11 @@ def render_composition(scene_ref, composition=None, write=True, stamp_label=True
                     raise ValueError("generative_curve requires camera in scene_data")
                 color, alpha = layer_generative_curve(
                     cfg, camera, ref_img, depths_range, spec, bg=bg)
+            elif layer_type == "zline":
+                camera = scene_data.get("camera")
+                if camera is None:
+                    raise ValueError("zline requires camera in scene_data")
+                color, alpha = layer_zline(cfg, camera, ref_img, spec, bg=bg)
             else:
                 raise ValueError(f"unknown layer type: {layer_type}")
             if layer_cache is not None:

@@ -96,7 +96,7 @@ async function commitCameraFromInputs({ silent = false } = {}) {
 const three = {
   renderer: null, scene: null, camera: null, controls: null,
   bbCenter: null, bbDiag: 1, maskGroup: null,
-  frameGroup: null, markerGroup: null,
+  frameGroup: null, markerGroup: null, zlineGroup: null,
 };
 
 const MARKERS = [];
@@ -143,6 +143,10 @@ function setupWireframe() {
   const markerGroup = new THREE.Group();
   scene.add(markerGroup);
 
+  // Z-line endpoint indicators
+  const zlineGroup = new THREE.Group();
+  scene.add(zlineGroup);
+
   // Orbit controls — target the bbox centre
   const controls = new OrbitControls(cam, canvas);
   controls.target.copy(bbCenter);
@@ -162,9 +166,11 @@ function setupWireframe() {
   three.maskGroup = maskGroup;
   three.frameGroup = frameGroup;
   three.markerGroup = markerGroup;
+  three.zlineGroup = zlineGroup;
 
   positionThreeCameraFromState();
   rebuildMaskSpheres();
+  rebuildZlineEndpoints();
   rebuildFrame();
   setupMarkerUI();
 
@@ -275,13 +281,130 @@ function rebuildMaskSpheres() {
   }
 }
 
+function rebuildZlineEndpoints() {
+  if (!three.zlineGroup) return;
+  three.zlineGroup.clear();
+  for (const layer of (COMPOSITION.layers || [])) {
+    if (layer.type !== "zline") continue;
+    const params = layer.params || {};
+    if (!params.show_endpoints) continue;
+    const center = SCENE.center || [0, 0, 0];
+    const p1 = new THREE.Vector3(
+      center[0] + (params.p1_x ?? 0),
+      center[1] + (params.p1_y ?? 0),
+      center[2] + (params.p1_z ?? 0)
+    );
+    const p2 = new THREE.Vector3(
+      center[0] + (params.p2_x ?? 0),
+      center[1] + (params.p2_y ?? 0),
+      center[2] + (params.p2_z ?? 0)
+    );
+
+    const r = three.bbDiag * 0.012;
+
+    // P1 sphere (cyan)
+    const s1 = new THREE.Mesh(
+      new THREE.SphereGeometry(r, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0x06b6d4 }),
+    );
+    s1.position.copy(p1);
+    three.zlineGroup.add(s1);
+
+    // P2 sphere (orange)
+    const s2 = new THREE.Mesh(
+      new THREE.SphereGeometry(r, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0xf97316 }),
+    );
+    s2.position.copy(p2);
+    three.zlineGroup.add(s2);
+
+    // Connecting line
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xe4e4e7, transparent: true, opacity: 0.5 });
+    three.zlineGroup.add(new THREE.Line(lineGeo, lineMat));
+
+    // Drop lines for depth perception
+    const groundY = three.bbCenter.y - three.bbDiag * 0.5;
+    const dropMat = new THREE.LineBasicMaterial({ color: 0x06b6d4, transparent: true, opacity: 0.2 });
+    three.zlineGroup.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([p1, new THREE.Vector3(p1.x, groundY, p1.z)]),
+      dropMat,
+    ));
+    const dropMat2 = new THREE.LineBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.2 });
+    three.zlineGroup.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([p2, new THREE.Vector3(p2.x, groundY, p2.z)]),
+      dropMat2,
+    ));
+  }
+}
+
 // -------------------------------------------------------------- layers ---
 function renderLayers() {
   const list = $('layers-list');
   list.innerHTML = '';
+
+  // Background color card (always at the top, conceptually the canvas base)
+  list.appendChild(buildBackgroundCard());
+
   (COMPOSITION.layers || []).forEach((layer, idx) => {
     list.appendChild(buildLayerCard(layer, idx));
   });
+}
+
+function buildBackgroundCard() {
+  const card = document.createElement('div');
+  card.className = 'bg-base border border-line rounded';
+
+  const bg = COMPOSITION.background || [0.97, 0.96, 0.93];
+  const r = (+bg[0]).toFixed(2);
+  const g = (+bg[1]).toFixed(2);
+  const b = (+bg[2]).toFixed(2);
+  const cssColor = `rgb(${Math.round(bg[0]*255)}, ${Math.round(bg[1]*255)}, ${Math.round(bg[2]*255)})`;
+
+  const header = document.createElement('div');
+  header.className = 'px-3 py-2 flex items-center gap-2';
+  header.innerHTML = `
+    <span class="w-4 h-4 shrink-0 rounded-sm border border-line" style="background:${cssColor};"></span>
+    <span class="text-[14px] text-ink flex-1 min-w-0">background</span>
+    <span class="text-mute text-[12px] font-mono shrink-0">base</span>
+  `;
+  card.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'p-3 space-y-2';
+
+  const row = document.createElement('div');
+  row.className = 'flex items-center gap-1';
+  const lab = document.createElement('label');
+  lab.className = 'text-mute text-[12px] w-20 shrink-0';
+  lab.textContent = 'color';
+  row.appendChild(lab);
+
+  ['r', 'g', 'b'].forEach((s, i) => {
+    const inp = document.createElement('input');
+    inp.type = 'number';
+    inp.step = '0.01';
+    inp.min = '0';
+    inp.max = '1';
+    inp.value = [r, g, b][i];
+    inp.title = `background ${s}`;
+    inp.className = 'flex-1 min-w-0 w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint';
+    inp.addEventListener('change', () => {
+      const newBg = [
+        +((COMPOSITION.background || [0.97, 0.96, 0.93])[0]),
+        +((COMPOSITION.background || [0.97, 0.96, 0.93])[1]),
+        +((COMPOSITION.background || [0.97, 0.96, 0.93])[2]),
+      ];
+      newBg[i] = +inp.value;
+      COMPOSITION.background = newBg;
+      commitComposition();
+    });
+    row.appendChild(inp);
+  });
+
+  body.appendChild(row);
+  card.appendChild(body);
+  return card;
 }
 
 function buildLayerCard(layer, idx) {
@@ -446,6 +569,7 @@ function commitComposition() {
   _commitTimer = setTimeout(flushComposition, 80);
   // visual updates are immediate
   rebuildMaskSpheres();
+  rebuildZlineEndpoints();
 }
 
 async function flushComposition() {
@@ -461,6 +585,7 @@ async function addLayer(type) {
     COMPOSITION.layers.push(data.layer);
     renderLayers();
     rebuildMaskSpheres();
+    rebuildZlineEndpoints();
   } catch (err) { appendLog('add layer failed: ' + err.message); }
 }
 
@@ -474,6 +599,7 @@ async function removeLayer(idx) {
     COMPOSITION.layers.splice(idx, 1);
     renderLayers();
     rebuildMaskSpheres();
+    rebuildZlineEndpoints();
   } catch (err) { appendLog('remove layer failed: ' + err.message); }
 }
 
@@ -483,25 +609,55 @@ function rebuildFrame() {
   three.frameGroup.clear();
   if (!$('show-frame').checked) return;
 
-  const cam = three.camera;
-  const target = three.controls.target;
-  const d = cam.position.distanceTo(target);
-  const fovRad = (cam.fov * Math.PI) / 180;
-  const h = d * Math.tan(fovRad / 2);
-  const w = h * cam.aspect;
+  // Use the renderer's actual projection parameters when available.
+  const center = new THREE.Vector3(...SCENE.center);
+  const Rcam = SCENE.Rcam;           // 3x3 world->camera rotation (or null)
+  const focal = SCENE.focal;         // focal length in pixels (or null)
+  const distance = SCENE.distance;   // camera->center distance (or null)
+  const ysign = SCENE.ysign ?? -1.0;
+  const [W, H] = SCENE.render_size;
 
-  const forward = new THREE.Vector3().subVectors(target, cam.position).normalize();
-  const worldUp = new THREE.Vector3(0, 1, 0);
-  const right = new THREE.Vector3().crossVectors(forward, worldUp).normalize();
-  const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+  let planeCenter, right, up;
+  let hw, hh;
+
+  if (Rcam && focal && distance) {
+    // Accurate focal-plane geometry from gsplat projection.
+    const r0 = new THREE.Vector3(Rcam[0][0], Rcam[0][1], Rcam[0][2]);
+    const r1 = new THREE.Vector3(Rcam[1][0], Rcam[1][1], Rcam[1][2]);
+    const r2 = new THREE.Vector3(Rcam[2][0], Rcam[2][1], Rcam[2][2]);
+    // Camera looks along +r2; focal plane is at z = distance in camera space.
+    planeCenter = new THREE.Vector3().copy(center).addScaledVector(r2, distance);
+    hw = distance * (W / 2) / focal;
+    hh = distance * (H / 2) / focal;
+    right = r0;
+    // ysign: image y = H/2 + ysign * focal * y_cam / z.
+    // Top of image (y_pix=0) => y_cam = -(H/2)*z/(ysign*focal) = -hh/ysign.
+    up = new THREE.Vector3().copy(r1).multiplyScalar(-1.0 / ysign);
+  } else {
+    // Fallback using camera angles (less accurate if biases exist).
+    const d = SCENE.extent * CAMERA.distance_k;
+    const aspect = W / H;
+    const fovRad = (CAMERA.fov_deg * Math.PI) / 180;
+    hh = d * Math.tan(fovRad / 2);
+    hw = hh * aspect;
+    const elev = CAMERA.elev_deg * Math.PI / 180;
+    const azim = CAMERA.azim_deg * Math.PI / 180;
+    const ce = Math.cos(elev), se = Math.sin(elev);
+    const ca = Math.cos(azim), sa = Math.sin(azim);
+    const forward = new THREE.Vector3(ce * sa, -se, -ce * ca).normalize();
+    right = new THREE.Vector3(ca, 0, sa).normalize();
+    up = new THREE.Vector3().crossVectors(right, forward).normalize();
+    planeCenter = new THREE.Vector3().copy(center).addScaledVector(forward, -d);
+  }
 
   const corners = [
-    new THREE.Vector3().copy(target).addScaledVector(right,  w).addScaledVector(up,  h),
-    new THREE.Vector3().copy(target).addScaledVector(right,  w).addScaledVector(up, -h),
-    new THREE.Vector3().copy(target).addScaledVector(right, -w).addScaledVector(up, -h),
-    new THREE.Vector3().copy(target).addScaledVector(right, -w).addScaledVector(up,  h),
+    new THREE.Vector3().copy(planeCenter).addScaledVector(right,  hw).addScaledVector(up,  hh),
+    new THREE.Vector3().copy(planeCenter).addScaledVector(right,  hw).addScaledVector(up, -hh),
+    new THREE.Vector3().copy(planeCenter).addScaledVector(right, -hw).addScaledVector(up, -hh),
+    new THREE.Vector3().copy(planeCenter).addScaledVector(right, -hw).addScaledVector(up,  hh),
   ];
 
+  // Frame rectangle
   const geo = new THREE.BufferGeometry().setFromPoints([
     corners[0], corners[1],
     corners[1], corners[2],
@@ -519,12 +675,17 @@ function rebuildFrame() {
   const diagMat = new THREE.LineBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.2 });
   three.frameGroup.add(new THREE.LineSegments(diagGeo, diagMat));
 
-  // Centre dot
-  const dotGeo = new THREE.SphereGeometry(three.bbDiag * 0.004, 8, 6);
+  // Centre dot at the camera position (where the renderer camera sits)
+  const dotGeo = new THREE.SphereGeometry(three.bbDiag * 0.006, 8, 6);
   const dotMat = new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.5 });
   const dot = new THREE.Mesh(dotGeo, dotMat);
-  dot.position.copy(target);
+  dot.position.copy(center);
   three.frameGroup.add(dot);
+
+  // Line from camera centre to frame plane centre
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([center, planeCenter]);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.3 });
+  three.frameGroup.add(new THREE.Line(lineGeo, lineMat));
 }
 
 // Toggle frame visibility
