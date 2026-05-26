@@ -138,7 +138,25 @@
                 <input id="cam-bias-y" type="number" step="0.01" title="head bias y" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[14px] focus:outline-none focus:border-faint" />
               </div>
             </div>
-            <div class="text-[11px] text-mute pt-2">drag bbox to orbit · scroll to zoom · release commits to render</div>
+            <div class="flex items-center gap-2 pt-2">
+              <input type="checkbox" id="show-frame" checked />
+              <label for="show-frame" class="text-mute text-[12px]">show frame</label>
+            </div>
+            <div class="text-[11px] text-mute pt-1">drag bbox to orbit · scroll to zoom · release commits to render</div>
+          </div>
+        </div>
+
+        <!-- Markers -->
+        <div class="bg-surf border border-line rounded flex flex-col">
+          <div class="px-3 py-2 border-b border-line text-[13px] text-faint">markers</div>
+          <div class="p-3 space-y-2">
+            <div class="flex items-center gap-2">
+              <input id="marker-x" type="number" step="0.01" placeholder="x" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint" />
+              <input id="marker-y" type="number" step="0.01" placeholder="y" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint" />
+              <input id="marker-z" type="number" step="0.01" placeholder="z" class="w-16 bg-base border border-line rounded px-2 py-1 text-right text-[13px] focus:outline-none focus:border-faint" />
+              <button type="button" id="btn-add-marker" class="px-2 py-1 text-[12px] border border-line rounded hover:bg-line text-mute hover:text-ink transition">add</button>
+            </div>
+            <div id="markers-list" class="space-y-1 max-h-28 overflow-y-auto"></div>
           </div>
         </div>
 

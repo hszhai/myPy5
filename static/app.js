@@ -96,7 +96,10 @@ async function commitCameraFromInputs({ silent = false } = {}) {
 const three = {
   renderer: null, scene: null, camera: null, controls: null,
   bbCenter: null, bbDiag: 1, maskGroup: null,
+  frameGroup: null, markerGroup: null,
 };
+
+const MARKERS = [];
 
 function setupWireframe() {
   const canvas = $('bbox-canvas');
@@ -132,6 +135,14 @@ function setupWireframe() {
   const maskGroup = new THREE.Group();
   scene.add(maskGroup);
 
+  // Composition frame indicator
+  const frameGroup = new THREE.Group();
+  scene.add(frameGroup);
+
+  // Custom markers
+  const markerGroup = new THREE.Group();
+  scene.add(markerGroup);
+
   // Orbit controls — target the bbox centre
   const controls = new OrbitControls(cam, canvas);
   controls.target.copy(bbCenter);
@@ -149,9 +160,13 @@ function setupWireframe() {
   three.bbCenter = bbCenter;
   three.bbDiag = bbDiag;
   three.maskGroup = maskGroup;
+  three.frameGroup = frameGroup;
+  three.markerGroup = markerGroup;
 
   positionThreeCameraFromState();
   rebuildMaskSpheres();
+  rebuildFrame();
+  setupMarkerUI();
 
   function loop() {
     controls.update();
@@ -203,6 +218,7 @@ function positionThreeCameraFromState() {
   three.camera.fov = CAMERA.fov_deg;
   three.camera.updateProjectionMatrix();
   three.controls.update();
+  rebuildFrame();
 }
 
 function syncCameraFromOrbit() {
@@ -222,6 +238,7 @@ function syncCameraFromOrbit() {
     head_bias_y: CAMERA.head_bias_y,
   };
   syncInputsFromCamera();
+  rebuildFrame();
 }
 
 function rebuildMaskSpheres() {
@@ -460,6 +477,127 @@ async function removeLayer(idx) {
   } catch (err) { appendLog('remove layer failed: ' + err.message); }
 }
 
+// -------------------------------------------------------------- frame ----
+function rebuildFrame() {
+  if (!three.frameGroup) return;
+  three.frameGroup.clear();
+  if (!$('show-frame').checked) return;
+
+  const cam = three.camera;
+  const target = three.controls.target;
+  const d = cam.position.distanceTo(target);
+  const fovRad = (cam.fov * Math.PI) / 180;
+  const h = d * Math.tan(fovRad / 2);
+  const w = h * cam.aspect;
+
+  const forward = new THREE.Vector3().subVectors(target, cam.position).normalize();
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(forward, worldUp).normalize();
+  const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+
+  const corners = [
+    new THREE.Vector3().copy(target).addScaledVector(right,  w).addScaledVector(up,  h),
+    new THREE.Vector3().copy(target).addScaledVector(right,  w).addScaledVector(up, -h),
+    new THREE.Vector3().copy(target).addScaledVector(right, -w).addScaledVector(up, -h),
+    new THREE.Vector3().copy(target).addScaledVector(right, -w).addScaledVector(up,  h),
+  ];
+
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    corners[0], corners[1],
+    corners[1], corners[2],
+    corners[2], corners[3],
+    corners[3], corners[0],
+  ]);
+  const mat = new THREE.LineBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.6 });
+  three.frameGroup.add(new THREE.LineSegments(geo, mat));
+
+  // Diagonal crosshair
+  const diagGeo = new THREE.BufferGeometry().setFromPoints([
+    corners[0], corners[2],
+    corners[1], corners[3],
+  ]);
+  const diagMat = new THREE.LineBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.2 });
+  three.frameGroup.add(new THREE.LineSegments(diagGeo, diagMat));
+
+  // Centre dot
+  const dotGeo = new THREE.SphereGeometry(three.bbDiag * 0.004, 8, 6);
+  const dotMat = new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.5 });
+  const dot = new THREE.Mesh(dotGeo, dotMat);
+  dot.position.copy(target);
+  three.frameGroup.add(dot);
+}
+
+// Toggle frame visibility
+function setupFrameToggle() {
+  $('show-frame').addEventListener('change', rebuildFrame);
+}
+
+// -------------------------------------------------------------- markers ----
+function setupMarkerUI() {
+  $('btn-add-marker').addEventListener('click', () => {
+    const x = parseFloat($('marker-x').value);
+    const y = parseFloat($('marker-y').value);
+    const y2 = parseFloat($('marker-z').value);
+    if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(y2)) return;
+    addMarker(x, y, y2);
+    $('marker-x').value = '';
+    $('marker-y').value = '';
+    $('marker-z').value = '';
+  });
+  renderMarkerList();
+}
+
+function addMarker(x, y, z) {
+  const id = Date.now() + Math.random();
+  MARKERS.push({ id, x, y, z });
+  rebuildMarkerSpheres();
+  renderMarkerList();
+}
+
+function removeMarker(id) {
+  const idx = MARKERS.findIndex((m) => m.id === id);
+  if (idx >= 0) {
+    MARKERS.splice(idx, 1);
+    rebuildMarkerSpheres();
+    renderMarkerList();
+  }
+}
+
+function rebuildMarkerSpheres() {
+  if (!three.markerGroup) return;
+  three.markerGroup.clear();
+  for (const m of MARKERS) {
+    const geo = new THREE.SphereGeometry(three.bbDiag * 0.012, 12, 8);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xf43f5e });
+    const sphere = new THREE.Mesh(geo, mat);
+    sphere.position.set(m.x, m.y, m.z);
+    three.markerGroup.add(sphere);
+
+    // Label line to help with depth perception
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(m.x, m.y, m.z),
+      new THREE.Vector3(m.x, three.bbCenter.y - three.bbDiag * 0.5, m.z),
+    ]);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xf43f5e, transparent: true, opacity: 0.3 });
+    three.markerGroup.add(new THREE.Line(lineGeo, lineMat));
+  }
+}
+
+function renderMarkerList() {
+  const list = $('markers-list');
+  list.innerHTML = '';
+  for (const m of MARKERS) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between text-[12px] text-mute font-mono';
+    row.innerHTML = `
+      <span>${m.x.toFixed(2)}, ${m.y.toFixed(2)}, ${m.z.toFixed(2)}</span>
+      <button type="button" data-mid="${m.id}" class="text-mute hover:text-ink px-1">×</button>
+    `;
+    row.querySelector('button').addEventListener('click', () => removeMarker(m.id));
+    list.appendChild(row);
+  }
+}
+
 function bindActions() {
   $('btn-render').addEventListener('click', doRender);
   $('btn-save').addEventListener('click', doSave);
@@ -474,6 +612,7 @@ function bindActions() {
     if (e.key === 'r') { e.preventDefault(); doRender(); }
     if (e.key === 's' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); doSave(); }
   });
+  setupFrameToggle();
 }
 
 async function doRender() {
